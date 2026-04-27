@@ -1,0 +1,12 @@
+{
+  "_comment": "Mapping Polymarket condition_id -> Kalshi event_ticker yang sudah diverifikasi manual. Markets kosong = permissive mode (warn). Markets >=1 entry = strict mode (hanya whitelisted yang diproses).",
+  "_format": {
+    "<polymarket_condition_id>": "<kalshi_event_ticker>"
+  },
+  "_example": {
+    "0xabc123...": "KXPRES-24-DJT"
+  },
+  "markets": {
+    "0x23dbb60ade08c2664ac29488325afbc0136735bc7beb9180d9c0cb72620b0b13": "KXFEDCHAIRCONFIRM"
+  }
+}

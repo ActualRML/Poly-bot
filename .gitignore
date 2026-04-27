@@ -1,0 +1,38 @@
+# Ignore environment variables
+.env
+.env.*
+.env.secret
+*.secret
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+venv/
+.venv/
+env/
+
+# Database & state
+data/*.db
+data/*.db.bak.*
+data/circuit_breaker.json
+data/circuit_breaker.json.bak.*
+data/historical/
+data/backtest_cache/
+data/backtest_results/
+data/whitelist_candidates.csv
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
