@@ -39,7 +39,7 @@ STATE_FILE = Path(__file__).resolve().parents[2] / "data" / "circuit_breaker.jso
 
 @dataclass
 class CircuitStatus:
-    """Status circuit breaker saat ini."""
+    """Status circuit breaker saat ini (PnL-based)."""
     can_trade: bool
     reason: str
     saklar_1_triggered: bool = False   # daily loss
@@ -48,15 +48,42 @@ class CircuitStatus:
 
     def __str__(self) -> str:
         if self.can_trade:
-            return "✅ Circuit breaker: OK — boleh trade"
+            return "Circuit breaker: OK — boleh trade"
         icons = []
         if self.saklar_1_triggered:
-            icons.append("🟡 Daily loss limit")
+            icons.append("Daily loss limit")
         if self.saklar_2_triggered:
-            icons.append("🟠 Consecutive loss limit")
+            icons.append("Consecutive loss limit")
         if self.saklar_3_triggered:
-            icons.append("🔴 Max drawdown — STOP TOTAL")
-        return f"⛔ Circuit breaker: {' | '.join(icons)} | {self.reason}"
+            icons.append("Max drawdown — STOP TOTAL")
+        return f"HALT | {' | '.join(icons)} | {self.reason}"
+
+
+@dataclass
+class SafetyStatus:
+    """
+    Status market-condition check (independent dari PnL).
+    HANYA blokir entry baru — exit posisi tetap berjalan.
+    """
+    halt_new_entries: bool
+    trigger: str          # "vol_extreme" | "drawdown_daily" | "ok"
+    reason: str
+    current_vol: float
+    daily_drawdown: float
+
+    def __str__(self) -> str:
+        if not self.halt_new_entries:
+            return (
+                f"Safety OK — "
+                f"vol={self.current_vol:.0%} | "
+                f"drawdown={self.daily_drawdown:.1%}"
+            )
+        return (
+            f"[SAFETY HALT] trigger={self.trigger} | "
+            f"vol={self.current_vol:.0%} | "
+            f"drawdown={self.daily_drawdown:.1%} | "
+            f"{self.reason}"
+        )
 
 
 @dataclass
@@ -202,6 +229,109 @@ class CircuitBreaker:
             )
 
         return CircuitStatus(can_trade=True, reason="OK")
+
+    # ─────────────────────────────────────────────
+    # SAFETY CHECK — market-condition, pre-entry only
+    # ─────────────────────────────────────────────
+
+    def check_safety_thresholds(
+        self,
+        current_vol: float,
+        daily_drawdown: float,
+    ) -> SafetyStatus:
+        """
+        Cek kondisi pasar eksternal sebelum membuka entry baru.
+        Independent dari PnL check() — selalu jalankan keduanya.
+
+        PENTING: fungsi ini HANYA memblokir _analyze_market().
+        Exit posisi (evaluate_exits, _resolve_checker, force_exit)
+        tetap harus berjalan meskipun safety halt aktif.
+
+        Args:
+            current_vol    : Realized vol annualized dari Binance
+                             (mis. 0.80 = 80%). Ambil dari vol_data["BTC"].
+            daily_drawdown : Fraction rugi hari ini vs starting capital.
+                             Negatif = rugi. Hitung:
+                             breaker.state.daily_loss / breaker.starting_capital
+
+        Returns:
+            SafetyStatus dengan halt_new_entries=True/False.
+
+        Threshold:
+            current_vol    > 1.0  (> 100% annual) → HALT: vol ekstrem
+            daily_drawdown < -0.15 (> 15% loss hari ini) → HALT: drawdown harian
+        """
+        # ── Cek 1: Extreme Volatility ─────────────────────────────
+        if current_vol > 1.0:
+            reason = (
+                f"Volatilitas ekstrem: {current_vol:.0%} annualized "
+                f"melebihi batas 100% — model log-normal tidak reliable, "
+                f"edge kalkulasi probabilitas tidak bisa diandalkan"
+            )
+            logger.critical(f"[SAFETY HALT] VOL_EXTREME — {reason}")
+            self._log_safety_event("vol_extreme", current_vol, daily_drawdown, reason)
+            return SafetyStatus(
+                halt_new_entries=True,
+                trigger="vol_extreme",
+                reason=reason,
+                current_vol=current_vol,
+                daily_drawdown=daily_drawdown,
+            )
+
+        # ── Cek 2: Daily Drawdown Limit ───────────────────────────
+        if daily_drawdown < -0.15:
+            reason = (
+                f"Daily drawdown {daily_drawdown:.1%} "
+                f"melebihi batas -15% — "
+                f"stop entry baru, tunggu hari berikutnya"
+            )
+            logger.critical(f"[SAFETY HALT] DRAWDOWN_DAILY — {reason}")
+            self._log_safety_event("drawdown_daily", current_vol, daily_drawdown, reason)
+            return SafetyStatus(
+                halt_new_entries=True,
+                trigger="drawdown_daily",
+                reason=reason,
+                current_vol=current_vol,
+                daily_drawdown=daily_drawdown,
+            )
+
+        # ── OK ────────────────────────────────────────────────────
+        logger.debug(
+            f"[SAFETY] OK — vol={current_vol:.0%} "
+            f"drawdown={daily_drawdown:.1%}"
+        )
+        return SafetyStatus(
+            halt_new_entries=False,
+            trigger="ok",
+            reason="Market conditions normal",
+            current_vol=current_vol,
+            daily_drawdown=daily_drawdown,
+        )
+
+    def _log_safety_event(
+        self,
+        trigger: str,
+        vol: float,
+        drawdown: float,
+        reason: str,
+    ) -> None:
+        """
+        Tulis audit log ke file terpisah agar mudah di-grep.
+        Format: JSON-per-line di data/safety_halt.log
+        """
+        try:
+            log_path = STATE_FILE.parent / "safety_halt.log"
+            entry = json.dumps({
+                "ts":       datetime.now(timezone.utc).isoformat(),
+                "trigger":  trigger,
+                "vol":      round(vol, 4),
+                "drawdown": round(drawdown, 4),
+                "reason":   reason,
+            })
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except Exception as e:
+            logger.warning(f"[SAFETY] Gagal tulis audit log: {e}")
 
     # ─────────────────────────────────────────────
     # RECORD TRADE — panggil setelah trade selesai
