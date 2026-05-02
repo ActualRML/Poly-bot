@@ -46,29 +46,12 @@ class Config:
     API_KEY            : str = _get("CLOB_API_KEY")
     API_SECRET         : str = _get("CLOB_SECRET")
     API_PASSPHRASE     : str = _get("CLOB_PASS")
-    FRED_API_KEY       : str = _get("FRED_API_KEY", "")
-    ALPHA_VANTAGE_KEY  : str = _get("ALPHA_VANTAGE_KEY", "")
     TELEGRAM_BOT_TOKEN : str = _get("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID   : str = _get("TELEGRAM_CHAT_ID", "")
 
     # --- ENDPOINTS ---
-    CLOB_HOST       : str = _get("CLOB_HOST", "https://clob.polymarket.com")
-    GAMMA_HOST      : str = _get("GAMMA_HOST", "https://gamma-api.polymarket.com")
-
-    # --- TARGET MARKET ---
-    MARKET_ID       : str = _get("MARKET_ID")
-    TOKEN_ID        : str = _get("TOKEN_ID")
-
-    # --- STRATEGY ---
-    STRATEGY_MODE   : str     = _get("STRATEGY_MODE", "mispricing")
-    SPREAD_MINIMUM  : Decimal = _get_decimal("SPREAD_MINIMUM", "0.0004")
-    JUMLAH_TICK     : int     = _get_int("JUMLAH_TICK", 1)
-    UKURAN_ORDER    : Decimal = _get_decimal("UKURAN_ORDER", "10")
-    MODE_SATU_SISI  : bool    = _get_bool("MODE_SATU_SISI", False)
-    MISPRICING_THRESHOLD  : float = _get_float("MISPRICING_THRESHOLD", 0.15)
-    POLITICAL_THRESHOLD   : float = _get_float("POLITICAL_THRESHOLD", 0.08)
-    POLITICAL_MIN_VOLUME  : float = _get_float("POLITICAL_MIN_VOLUME", 5000.0)
-    METACULUS_MATCH_SCORE : float = _get_float("METACULUS_MATCH_SCORE", 0.85)
+    CLOB_HOST  : str = _get("CLOB_HOST", "https://clob.polymarket.com")
+    GAMMA_HOST : str = _get("GAMMA_HOST", "https://gamma-api.polymarket.com")
 
     # --- RISK MANAGEMENT (KELLY) ---
     KELLY_MULTIPLIER       : float = _get_float("KELLY_MULTIPLIER", 0.5)
@@ -82,20 +65,26 @@ class Config:
     TIGHT_TRAILING_STOP_PCT : float = _get_float("TIGHT_TRAILING_STOP_PCT", 0.07)
     PROFIT_THRESHOLD        : float = _get_float("PROFIT_THRESHOLD", 0.85)
 
-    # --- MARKET FILTERS ---
-    MIN_MARKET_VOLUME   : float = _get_float("MIN_MARKET_VOLUME", 10_000)
-    MIN_MARKET_LIQUIDITY: float = _get_float("MIN_MARKET_LIQUIDITY", 5_000)
-    MAX_DAYS_TO_RESOLVE : int   = _get_int("MAX_DAYS_TO_RESOLVE", 7)
-    MIN_DAYS_TO_RESOLVE : int   = _get_int("MIN_DAYS_TO_RESOLVE", 1)
+    # --- CIRCUIT BREAKER ---
+    MAX_DRAWDOWN_PCT       : float = _get_float("MAX_DRAWDOWN_PCT", 0.30)
+    MAX_DAILY_LOSS_PCT     : float = _get_float("MAX_DAILY_LOSS_PCT", 0.10)
+    MAX_CONSECUTIVE_LOSSES : int   = _get_int("MAX_CONSECUTIVE_LOSSES", 3)
 
-    # --- BACKTEST ---
-    SALDO_AWAL      : Decimal = _get_decimal("SALDO_AWAL", "1000")
-    CSV_PATH        : str     = _get("CSV_PATH", "data/historical/market_log.csv")
+    # --- HOURLY STRATEGY ---
+    HOURLY_MAX_MINUTES_TO_RESOLVE : int   = _get_int("HOURLY_MAX_MINUTES_TO_RESOLVE", 90)
+    HOURLY_MIN_MINUTES_TO_RESOLVE : int   = _get_int("HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
+    HOURLY_MISPRICING_THRESHOLD   : float = _get_float("HOURLY_MISPRICING_THRESHOLD", 0.12)
+    HOURLY_MIN_WINRATE_STRICT     : float = _get_float("HOURLY_MIN_WINRATE_STRICT", 0.75)
+    HOURLY_MIN_MARKET_VOLUME      : float = _get_float("HOURLY_MIN_MARKET_VOLUME", 500.0)
+    HOURLY_MIN_LIQUIDITY          : float = _get_float("HOURLY_MIN_LIQUIDITY", 200.0)
+    HOURLY_VOL_HOURS              : int   = _get_int("HOURLY_VOL_HOURS", 24)
+    HOURLY_DRIFT_HOURS            : int   = _get_int("HOURLY_DRIFT_HOURS", 4)
 
-    # --- SYSTEM ---
-    POLLING_INTERVAL: int  = _get_int("POLLING_INTERVAL_DETIK", 5)
-    LOG_LEVEL       : str  = _get("LOG_LEVEL", "INFO")
-    DRY_RUN         : bool = _get_bool("DRY_RUN", True)
+    # --- CAPITAL & SYSTEM ---
+    SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
+    POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
+    LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
+    DRY_RUN          : bool    = _get_bool("DRY_RUN", True)
 
 
 config = Config()

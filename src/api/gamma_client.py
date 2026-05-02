@@ -44,20 +44,30 @@ class GammaClient:
         endpoint: str,
         session: aiohttp.ClientSession,
         params: dict = None,
+        _retries: int = 2,
     ) -> dict | list:
-        """Async GET request."""
+        """Async GET request dengan retry untuk timeout transient."""
         url = f"{self.host}{endpoint}"
-        try:
-            async with session.get(
-                url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except Exception as e:
-            logger.error(f"Gamma API async error endpoint={endpoint}: {e}")
-            raise
+        for attempt in range(_retries + 1):
+            try:
+                async with session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    resp.raise_for_status()
+                    return await resp.json()
+            except asyncio.TimeoutError:
+                if attempt < _retries:
+                    wait = 2 ** attempt  # 1s, 2s
+                    logger.warning(f"Gamma timeout {endpoint} (attempt {attempt+1}), retry in {wait}s")
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error(f"Gamma API timeout {endpoint} setelah {_retries+1} attempts")
+                raise
+            except Exception as e:
+                logger.error(f"Gamma API async error endpoint={endpoint}: {e}")
+                raise
 
     # ─────────────────────────────────────────────
     # SYNC HTTP (fallback)
@@ -115,6 +125,22 @@ class GammaClient:
             max_days_to_resolve, min_days_to_resolve
         )
 
+    async def ascan_hourly_opportunities(
+        self,
+        session: aiohttp.ClientSession,
+        min_volume: float = 500,
+        min_liquidity: float = 200,
+        max_minutes_to_resolve: int = 90,
+        min_minutes_to_resolve: int = 5,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Async: Scan hourly markets — filter berdasarkan menit, bukan hari."""
+        markets = await self.aget_markets(session, limit=limit, active=True)
+        return self._filter_markets_hourly(
+            markets, min_volume, min_liquidity,
+            max_minutes_to_resolve, min_minutes_to_resolve,
+        )
+
     # ─────────────────────────────────────────────
     # MARKET FETCHING — SYNC (backward compat)
     # ─────────────────────────────────────────────
@@ -162,6 +188,56 @@ class GammaClient:
         "sports", "entertainment", "music", "awards",
         "tv", "movies", "gaming", "esports",
     }
+
+    def _filter_markets_hourly(
+        self,
+        markets: list[dict],
+        min_volume: float,
+        min_liquidity: float,
+        max_minutes_to_resolve: int,
+        min_minutes_to_resolve: int,
+    ) -> list[dict]:
+        """Filter hourly markets — berbasis menit bukan hari."""
+        now = datetime.now(timezone.utc)
+        results = []
+
+        for m in markets:
+            try:
+                category = (m.get("category") or "").lower().strip()
+                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                    continue
+
+                volume = float(m.get("volume", 0) or 0)
+                if volume < min_volume:
+                    continue
+
+                liquidity = float(m.get("liquidity", 0) or 0)
+                if liquidity < min_liquidity:
+                    continue
+
+                end_date_str = m.get("endDate") or m.get("end_date_iso")
+                if not end_date_str:
+                    continue
+
+                end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                minutes_to_resolve = (end_date - now).total_seconds() / 60
+
+                if minutes_to_resolve < min_minutes_to_resolve:
+                    continue
+                if minutes_to_resolve > max_minutes_to_resolve:
+                    continue
+
+                m["minutes_to_resolve"] = round(minutes_to_resolve, 1)
+                m["days_to_resolve"]    = minutes_to_resolve / 1440.0
+                m["scan_timestamp"]     = now.isoformat()
+                results.append(m)
+
+            except (ValueError, TypeError, KeyError) as e:
+                logger.debug(f"Skip market {m.get('id', '?')}: {e}")
+                continue
+
+        logger.debug(f"Hourly scan: {len(results)}/{len(markets)} market lolos filter")
+        return results
 
     def _filter_markets(
         self,
