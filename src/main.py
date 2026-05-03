@@ -197,7 +197,10 @@ async def _force_exit_check(
             )
 
 
-async def _get_base_rates(market: dict, builder, session: aiohttp.ClientSession) -> list:
+async def _get_base_rates(
+    market: dict, builder, session: aiohttp.ClientSession,
+    vol_data: dict | None = None,
+) -> list:
     """Auto-generate base rates untuk crypto market (async)."""
     question     = (market.get("question") or "").lower()
     calc         = CryptoProbabilityCalculator()
@@ -229,9 +232,13 @@ async def _get_base_rates(market: dict, builder, session: aiohttp.ClientSession)
         direction = "below" if any(k in question for k in ["dip", "drop", "fall", "below", "↓"]) else "above"
         use_barrier = " on " not in question
 
-        from src.api.binance_client import fetch_realized_vol
-        vol_hours  = getattr(config, "HOURLY_VOL_HOURS", 4)
-        volatility = await fetch_realized_vol(symbol, session, hours=vol_hours)
+        # Pakai vol dari vol_data cycle (sudah di-fetch di _build_vol_data) —
+        # hindari fetch ulang per-market yang menyebabkan Binance rate limit (418).
+        if vol_data and symbol in vol_data:
+            volatility = vol_data[symbol]
+        else:
+            from src.api.binance_client import fetch_realized_vol
+            volatility = await fetch_realized_vol(symbol, session, hours=getattr(config, "HOURLY_VOL_HOURS", 4))
 
         result = await calc.calculate_async(
             symbol, price, target, days_remaining, session,
@@ -271,7 +278,7 @@ async def _analyze_market(
     if not yes_price or yes_price <= 0 or yes_price >= 1:
         return
 
-    yes_base_rates = await _get_base_rates(market, builder, session)
+    yes_base_rates = await _get_base_rates(market, builder, session, vol_data=vol_data)
     if not yes_base_rates:
         return
 

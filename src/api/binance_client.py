@@ -42,17 +42,32 @@ _vol_cache: dict[str, float] = {}
 _vol_cache_time: dict[str, float] = {}
 _VOL_TTL = 300  # 5 menit
 
+# IP ban tracking — Binance returns 418 saat IP di-ban
+# Setelah kena 418, tahan request selama _BAN_COOLDOWN detik
+_ban_until: float = 0.0
+_BAN_COOLDOWN = 300  # 5 menit cooldown per 418
+
 
 async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[float]:
-    """Real-time price dari Binance. Cache 30 detik."""
+    """Real-time price dari Binance. Cache 30 detik. Stale fallback saat 418/429."""
+    global _ban_until
     symbol = symbol.upper()
     ticker = SYMBOL_MAP.get(symbol)
     if not ticker:
         return None
 
     now = datetime.now(timezone.utc).timestamp()
+
+    # Cache hit
     if symbol in _price_cache and now - _price_cache_time.get(symbol, 0) < _PRICE_TTL:
         return _price_cache[symbol]
+
+    # IP masih di-ban — kembalikan stale cache daripada spam request
+    if now < _ban_until:
+        if symbol in _price_cache:
+            logger.debug(f"[BINANCE] {symbol} ban aktif, pakai stale cache")
+            return _price_cache[symbol]
+        return None
 
     try:
         async with session.get(
@@ -60,6 +75,13 @@ async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[f
             params={"symbol": ticker},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
+            if resp.status in (418, 429):
+                _ban_until = now + _BAN_COOLDOWN
+                logger.warning(
+                    f"[BINANCE] Rate limit ({resp.status}) — pause {_BAN_COOLDOWN}s. "
+                    f"Pakai stale cache kalau ada."
+                )
+                return _price_cache.get(symbol)
             resp.raise_for_status()
             data = await resp.json()
             price = float(data["price"])
@@ -69,7 +91,7 @@ async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[f
             return price
     except Exception as e:
         logger.warning(f"[BINANCE] Price fetch gagal {symbol}: {e}")
-        return None
+        return _price_cache.get(symbol)  # stale fallback
 
 
 async def fetch_klines(
@@ -95,12 +117,21 @@ async def fetch_klines(
     if end_ms is not None:
         params["endTime"] = end_ms
 
+    now = datetime.now(timezone.utc).timestamp()
+    if now < _ban_until:
+        logger.debug(f"[BINANCE] Klines {symbol} skip — ban aktif")
+        return []
+
     try:
         async with session.get(
             f"{BINANCE_HOST}/api/v3/klines",
             params=params,
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
+            if resp.status in (418, 429):
+                _ban_until = now + _BAN_COOLDOWN
+                logger.warning(f"[BINANCE] Rate limit ({resp.status}) klines — pause {_BAN_COOLDOWN}s")
+                return []
             resp.raise_for_status()
             data = await resp.json()
 
