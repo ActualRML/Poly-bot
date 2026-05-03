@@ -60,7 +60,7 @@ class Config:
     MIN_WINRATE            : float = _get_float("MIN_WINRATE", 0.52)
     MIN_PROFIT_PCT         : float = _get_float("MIN_PROFIT_PCT", 0.15)
     MAX_OPEN_POSITIONS     : int   = _get_int("MAX_OPEN_POSITIONS", 5)
-    MAX_CAPITAL_PER_MARKET : float = _get_float("MAX_CAPITAL_PER_MARKET", 15.0)
+    MAX_CAPITAL_PER_MARKET : float = _get_float("MAX_CAPITAL_PER_MARKET", 30.0)
     TRAILING_STOP_PCT       : float = _get_float("TRAILING_STOP_PCT", 0.15)
     TIGHT_TRAILING_STOP_PCT : float = _get_float("TIGHT_TRAILING_STOP_PCT", 0.07)
     PROFIT_THRESHOLD        : float = _get_float("PROFIT_THRESHOLD", 0.85)

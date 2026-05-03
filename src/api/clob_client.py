@@ -104,19 +104,21 @@ class ClobClient:
             Snapshot dengan best_bid dan best_ask dalam Decimal,
             atau None jika gagal.
         """
-        tid = token_id or config.TOKEN_ID
+        if not token_id:
+            log.error("ambil_snapshot: token_id wajib diisi")
+            return None
         if not self._terhubung or not self._client:
             log.error("Client belum terhubung. Panggil hubungkan() dulu.")
             return None
 
         try:
-            buku = self._client.get_order_book(tid)
+            buku = self._client.get_order_book(token_id)
 
             bids = buku.bids or []
             asks = buku.asks or []
 
             if not bids or not asks:
-                log.warning(f"[yellow]Order book kosong untuk token {tid}[/yellow]")
+                log.warning(f"[yellow]Order book kosong untuk token {token_id[:12]}[/yellow]")
                 return None
 
             best_bid = ke_decimal(str(bids[-1].price))
@@ -126,7 +128,7 @@ class ClobClient:
 
             return Snapshot(
                 timestamp  = datetime.now(timezone.utc),
-                market_id  = config.MARKET_ID,
+                market_id  = token_id,
                 best_bid   = best_bid,
                 best_ask   = best_ask,
                 bid_size   = bid_size,
@@ -163,7 +165,7 @@ class ClobClient:
             )
             return Order(
                 order_id  = f"dryrun-{uuid.uuid4().hex[:8]}",
-                market_id = config.MARKET_ID,
+                market_id = token_id or "",
                 sisi      = sisi,
                 harga     = harga,
                 ukuran    = ukuran,
@@ -174,12 +176,15 @@ class ClobClient:
             log.error("Client belum terhubung.")
             return None
 
-        tid = token_id or config.TOKEN_ID
+        if not token_id:
+            log.error("pasang_order: token_id wajib diisi")
+            return None
+
         try:
             from py_clob_client.clob_types import OrderArgs
 
             args = OrderArgs(
-                token_id = tid,
+                token_id = token_id,
                 price    = float(harga),
                 size     = float(ukuran),
                 side     = sisi.value,
@@ -193,7 +198,7 @@ class ClobClient:
             )
             return Order(
                 order_id  = order_id,
-                market_id = config.MARKET_ID,
+                market_id = token_id,
                 sisi      = sisi,
                 harga     = harga,
                 ukuran    = ukuran,

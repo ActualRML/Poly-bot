@@ -34,28 +34,27 @@ def get_dynamic_threshold(
     multiplier: float = 1.5,
 ) -> float:
     """
-    Hitung mispricing gap threshold berbasis realized vol 1h dari Binance.
+    Hitung mispricing gap threshold berbasis realized vol annualized dari Binance.
 
-    Formula:
-        vol_daily = annualized_vol / sqrt(24)
-        threshold = vol_daily * multiplier
-        clamp     = [MIN_THRESHOLD, MAX_THRESHOLD]
+    Formula (kalibrasi empiris):
+        vol_scaled = annualized_vol / sqrt(24)
+        threshold  = vol_scaled * multiplier
+        clamp      = [MIN_THRESHOLD, MAX_THRESHOLD]
 
-    Intuisi: threshold = berapa persen gap minimum yang dianggap "edge nyata"
-    vs noise pasar. Saat vol tinggi, noise lebih besar → butuh gap lebih besar.
-    Faktor sqrt(24) konversi dari skala tahunan ke 1-day trading period.
-    Multiplier 1.5 = "butuh gap 1.5x dari expected noise harian."
+    Faktor sqrt(24) di sini bukan konversi unit waktu apapun — ini scaling
+    empiris yang menghasilkan threshold ~12% saat vol=40% (regime normal).
+    Tujuannya: makin volatile pasar, makin lebar noise → butuh gap lebih
+    besar untuk dianggap edge nyata. Multiplier 1.5 = lebih selektif.
 
-    Kalibrasi bawaan (multiplier=1.5):
-        vol=40%  annualized → threshold ≈ 12.2%  (sama dengan default lama)
-        vol=70%  annualized → threshold ≈ 21.4%  (volatile, lebih selektif)
-        vol=20%  annualized → threshold ≈  6.1%  (calm, floored ke 6%)
-        vol=100% annualized → threshold = 30.6% → capped ke 25%
+    Kalibrasi (multiplier=1.5):
+        vol=40%  annualized → threshold ≈ 12.2%
+        vol=70%  annualized → threshold ≈ 21.4%
+        vol=20%  annualized → threshold ≈  6.1%  (floored ke MIN)
+        vol=100% annualized → threshold = 30.6%  (capped ke MAX)
 
     Args:
         asset      : "BTC", "ETH", "SOL", "BNB" — kunci di vol_data
         vol_data   : Dict {asset: annualized_vol_float, "DEFAULT": float}
-                     Di-build tiap cycle dari fetch_realized_vol() di main.py
         multiplier : Scaling factor (default 1.5 = agresif, 1.0 = konservatif)
 
     Returns:
@@ -67,13 +66,13 @@ def get_dynamic_threshold(
         or DEFAULT_VOL_ANNUAL
     )
 
-    vol_daily = vol_annual / math.sqrt(24)
-    threshold = vol_daily * multiplier
-    result    = max(MIN_THRESHOLD, min(MAX_THRESHOLD, threshold))
+    vol_scaled = vol_annual / math.sqrt(24)
+    threshold  = vol_scaled * multiplier
+    result     = max(MIN_THRESHOLD, min(MAX_THRESHOLD, threshold))
 
     logger.debug(
         f"[THRESHOLD] {asset} vol={vol_annual:.0%} "
-        f"→ vol_daily={vol_daily:.1%} × {multiplier} "
+        f"→ scaled={vol_scaled:.1%} × {multiplier} "
         f"= {threshold:.1%} → clamped {result:.1%}"
     )
     return result

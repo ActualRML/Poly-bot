@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 MAX_OPEN_POSITIONS = 5       # Maksimal posisi bersamaan
-MAX_CAPITAL_PER_MARKET = 15  # Persen maksimal modal di satu market
+MAX_CAPITAL_PER_MARKET = 30  # Persen maksimal modal di satu market
 
 
 # ─────────────────────────────────────────────

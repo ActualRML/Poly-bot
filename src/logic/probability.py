@@ -53,8 +53,13 @@ def _get_calibration_correction(asset: str, target_pct: float, model: str = "at_
     """
     Interpolasi linear koreksi kalibrasi untuk target_pct sembarang.
     Return 0.0 jika asset tidak ada di tabel atau target_pct di bawah titik pertama.
+
+    target_pct di-abs sebelum lookup — backtest dilakukan di sisi "above",
+    tapi koreksi diasumsikan simetris untuk above/below (jarak target dari spot
+    yang menentukan bias model, bukan arahnya).
     """
     corrections = CALIBRATION_CORRECTION.get(model, {}).get(asset.upper(), {})
+    target_pct = abs(target_pct)
     if not corrections or target_pct <= 0:
         return 0.0
 
@@ -226,10 +231,12 @@ class CryptoProbabilityCalculator:
                 prob  = self._expiry_prob(current_price, target_price, T, vol, mu_adj, direction)
                 model = "at_expiry"
 
-            if direction == "above":
-                model_key  = "barrier" if use_barrier else "at_expiry"
-                target_pct = (target_price - current_price) / current_price
-                prob -= _get_calibration_correction(asset, target_pct, model_key)
+            # Apply calibration correction untuk above DAN below.
+            # Backtest hanya di sisi above, tapi correction diasumsikan simetris
+            # (jarak target dari spot yang menentukan bias, bukan arah).
+            model_key  = "barrier" if use_barrier else "at_expiry"
+            target_pct = (target_price - current_price) / current_price
+            prob -= _get_calibration_correction(asset, target_pct, model_key)
 
             prob = max(0.001, min(0.999, prob))
 
@@ -259,11 +266,23 @@ class CryptoProbabilityCalculator:
         ln_SK  = math.log(S / K)
         d1 = (-ln_SK + mu_adj * T) / (vol * sqrt_T)
         d2 = ( ln_SK + mu_adj * T) / (vol * sqrt_T)
-        exp_term = math.exp(2.0 * mu_adj * math.log(K / S) / (vol ** 2)) if vol > 0 else 0.0
-        if direction == "above":
-            return self._norm_cdf(d2) + exp_term * self._norm_cdf(-d1)
+        # Guard overflow: kalau exponent extreme, exp_term effectively 0 atau 1.
+        # Probabilitas tetap finite karena _norm_cdf bounded [0, 1].
+        if vol > 0:
+            exp_arg = 2.0 * mu_adj * math.log(K / S) / (vol ** 2)
+            if exp_arg < -700:
+                exp_term = 0.0
+            elif exp_arg > 700:
+                exp_term = math.exp(700)  # cap untuk hindari OverflowError
+            else:
+                exp_term = math.exp(exp_arg)
         else:
-            return self._norm_cdf(-d2) + exp_term * self._norm_cdf(d1)
+            exp_term = 0.0
+        if direction == "above":
+            prob = self._norm_cdf(d2) + exp_term * self._norm_cdf(-d1)
+        else:
+            prob = self._norm_cdf(-d2) + exp_term * self._norm_cdf(d1)
+        return max(0.0, min(1.0, prob))
 
     def _expiry_prob(self, S, K, T, vol, mu_adj, direction) -> float:
         d2 = (math.log(S / K) + mu_adj * T) / (vol * math.sqrt(T))

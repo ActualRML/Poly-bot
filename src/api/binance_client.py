@@ -130,7 +130,9 @@ def _compute_annualized_vol(closes: list[float]) -> Optional[float]:
     mean = sum(log_returns) / n
     variance = sum((r - mean) ** 2 for r in log_returns) / max(n - 1, 1)
     annualized = math.sqrt(variance) * math.sqrt(8760)  # hourly → annualize (24*365)
-    return annualized if 0.05 <= annualized <= 10.0 else None
+    # Lower bound 2% — vol bisa sangat rendah di market tenang malam hari.
+    # Reject hanya kalau zero/near-zero (data buruk) atau >1000% (parsing error).
+    return annualized if 0.02 <= annualized <= 10.0 else None
 
 
 async def fetch_realized_vol(

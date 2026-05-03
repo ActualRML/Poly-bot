@@ -135,7 +135,9 @@ class GammaClient:
         limit: int = 500,
     ) -> list[dict]:
         """Async: Scan hourly markets — filter berdasarkan menit, bukan hari."""
-        markets = await self.aget_markets(session, limit=limit, active=True)
+        markets = await self.aget_markets(
+            session, limit=limit, active=True, closed=False
+        )
         return self._filter_markets_hourly(
             markets, min_volume, min_liquidity,
             max_minutes_to_resolve, min_minutes_to_resolve,
@@ -200,31 +202,77 @@ class GammaClient:
         """Filter hourly markets — berbasis menit bukan hari."""
         now = datetime.now(timezone.utc)
         results = []
+        skip = {"status": 0, "orderbook": 0, "category": 0, "volume": 0, "liquidity": 0, "time": 0}
 
         for m in markets:
+            mid = (m.get("conditionId") or m.get("id") or "?")[:8]
             try:
-                category = (m.get("category") or "").lower().strip()
-                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                # ── 1. Status — cek paling awal, paling murah ─────────
+                if m.get("closed") is True:
+                    logger.debug(f"Skip {mid}: closed=true")
+                    skip["status"] += 1
+                    continue
+                if m.get("active") is False:
+                    logger.debug(f"Skip {mid}: active=false")
+                    skip["status"] += 1
+                    continue
+                if m.get("archived") is True:
+                    logger.debug(f"Skip {mid}: archived=true")
+                    skip["status"] += 1
+                    continue
+                if m.get("resolved") is True:
+                    logger.debug(f"Skip {mid}: resolved=true")
+                    skip["status"] += 1
                     continue
 
+                # ── 2. Order book — hanya market yang bisa di-trade ──
+                if m.get("enableOrderBook") is False:
+                    logger.debug(f"Skip {mid}: enableOrderBook=false")
+                    skip["orderbook"] += 1
+                    continue
+
+                # ── 3. Kategori non-modelable ─────────────────────────
+                category = (m.get("category") or "").lower().strip()
+                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                    skip["category"] += 1
+                    continue
+
+                # ── 4. Volume & likuiditas ────────────────────────────
                 volume = float(m.get("volume", 0) or 0)
                 if volume < min_volume:
+                    logger.debug(f"Skip {mid}: volume ${volume:,.0f} < ${min_volume:,.0f}")
+                    skip["volume"] += 1
                     continue
 
                 liquidity = float(m.get("liquidity", 0) or 0)
                 if liquidity < min_liquidity:
+                    logger.debug(f"Skip {mid}: liquidity ${liquidity:,.0f} < ${min_liquidity:,.0f}")
+                    skip["liquidity"] += 1
                     continue
 
+                # ── 5. Window waktu ───────────────────────────────────
                 end_date_str = m.get("endDate") or m.get("end_date_iso")
                 if not end_date_str:
+                    logger.debug(f"Skip {mid}: endDate missing")
+                    skip["time"] += 1
                     continue
 
                 end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
                 minutes_to_resolve = (end_date - now).total_seconds() / 60
 
                 if minutes_to_resolve < min_minutes_to_resolve:
+                    logger.debug(
+                        f"Skip {mid}: {minutes_to_resolve:.0f} min "
+                        f"< min {min_minutes_to_resolve}"
+                    )
+                    skip["time"] += 1
                     continue
                 if minutes_to_resolve > max_minutes_to_resolve:
+                    logger.debug(
+                        f"Skip {mid}: {minutes_to_resolve:.0f} min "
+                        f"> max {max_minutes_to_resolve}"
+                    )
+                    skip["time"] += 1
                     continue
 
                 m["minutes_to_resolve"] = round(minutes_to_resolve, 1)
@@ -233,10 +281,15 @@ class GammaClient:
                 results.append(m)
 
             except (ValueError, TypeError, KeyError) as e:
-                logger.debug(f"Skip market {m.get('id', '?')}: {e}")
+                logger.debug(f"Skip {mid}: parse error: {e}")
                 continue
 
-        logger.debug(f"Hourly scan: {len(results)}/{len(markets)} market lolos filter")
+        logger.info(
+            f"Hourly scan: {len(results)}/{len(markets)} lolos | "
+            f"skip: status={skip['status']} orderbook={skip['orderbook']} "
+            f"category={skip['category']} vol={skip['volume']} "
+            f"liq={skip['liquidity']} time={skip['time']}"
+        )
         return results
 
     def _filter_markets(
@@ -250,34 +303,61 @@ class GammaClient:
         """Filter logic — sama untuk sync dan async."""
         now = datetime.now(timezone.utc)
         results = []
-        skipped_category = 0
+        skip = {"status": 0, "orderbook": 0, "category": 0, "volume": 0, "liquidity": 0, "time": 0}
 
         for m in markets:
+            mid = (m.get("conditionId") or m.get("id") or "?")[:8]
             try:
-                # Skip kategori yang tidak bisa dimodel
-                category = (m.get("category") or "").lower().strip()
-                if any(cat in category for cat in self.SKIP_CATEGORIES):
-                    skipped_category += 1
+                # ── 1. Status ─────────────────────────────────────────
+                if m.get("closed") is True:
+                    skip["status"] += 1
+                    continue
+                if m.get("active") is False:
+                    skip["status"] += 1
+                    continue
+                if m.get("archived") is True:
+                    skip["status"] += 1
+                    continue
+                if m.get("resolved") is True:
+                    skip["status"] += 1
                     continue
 
+                # ── 2. Order book ─────────────────────────────────────
+                if m.get("enableOrderBook") is False:
+                    skip["orderbook"] += 1
+                    continue
+
+                # ── 3. Kategori non-modelable ─────────────────────────
+                category = (m.get("category") or "").lower().strip()
+                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                    skip["category"] += 1
+                    continue
+
+                # ── 4. Volume & likuiditas ────────────────────────────
                 volume = float(m.get("volume", 0) or 0)
                 if volume < min_volume:
+                    skip["volume"] += 1
                     continue
 
                 liquidity = float(m.get("liquidity", 0) or 0)
                 if liquidity < min_liquidity:
+                    skip["liquidity"] += 1
                     continue
 
+                # ── 5. Window waktu ───────────────────────────────────
                 end_date_str = m.get("endDate") or m.get("end_date_iso")
                 if not end_date_str:
+                    skip["time"] += 1
                     continue
 
                 end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
                 days_to_resolve = (end_date - now).days
 
                 if days_to_resolve < min_days_to_resolve:
+                    skip["time"] += 1
                     continue
                 if days_to_resolve > max_days_to_resolve:
+                    skip["time"] += 1
                     continue
 
                 m["days_to_resolve"] = days_to_resolve
@@ -285,19 +365,23 @@ class GammaClient:
                 results.append(m)
 
             except (ValueError, TypeError, KeyError) as e:
-                logger.debug(f"Skip market {m.get('id', '?')}: {e}")
+                logger.debug(f"Skip {mid}: parse error: {e}")
                 continue
 
-        if skipped_category:
-            logger.debug(f"Skip {skipped_category} market kategori non-modelable")
-        logger.debug(f"Scan selesai: {len(results)}/{len(markets)} market lolos filter")
+        logger.debug(
+            f"Scan: {len(results)}/{len(markets)} lolos | "
+            f"skip: status={skip['status']} orderbook={skip['orderbook']} "
+            f"category={skip['category']} vol={skip['volume']} "
+            f"liq={skip['liquidity']} time={skip['time']}"
+        )
         return results
 
     # ─────────────────────────────────────────────
     # TOKEN & PRICE HELPERS (tidak butuh async)
     # ─────────────────────────────────────────────
 
-    def extract_token_ids(self, market: dict) -> list[dict]:
+    @staticmethod
+    def extract_token_ids(market: dict) -> list[dict]:
         """Ekstrak token_id dari market untuk dipakai di CLOB API."""
         import json
         tokens         = []
@@ -327,7 +411,8 @@ class GammaClient:
 
         return tokens
 
-    def get_token_prices(self, market: dict) -> dict:
+    @staticmethod
+    def get_token_prices(market: dict) -> dict:
         """Ambil harga dari market data Gamma. Return: {"Yes": 0.72, "No": 0.28}"""
         import json
         prices         = {}
