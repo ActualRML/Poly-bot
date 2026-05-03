@@ -14,6 +14,7 @@ Public API:
 
 from __future__ import annotations
 
+import asyncio
 import math
 import logging
 from datetime import datetime, timezone, timedelta
@@ -47,6 +48,16 @@ _VOL_TTL = 300  # 5 menit
 _ban_until: float = 0.0
 _BAN_COOLDOWN = 300  # 5 menit cooldown per 418
 
+# Per-symbol lock — cegah cache stampede saat 43 coroutine paralel
+# cek cache expired bersamaan dan semua kirim HTTP request sekaligus
+_price_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_price_lock(symbol: str) -> asyncio.Lock:
+    if symbol not in _price_locks:
+        _price_locks[symbol] = asyncio.Lock()
+    return _price_locks[symbol]
+
 
 async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[float]:
     """Real-time price dari Binance. Cache 30 detik. Stale fallback saat 418/429."""
@@ -58,40 +69,47 @@ async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[f
 
     now = datetime.now(timezone.utc).timestamp()
 
-    # Cache hit
+    # Cache hit — cek sebelum acquire lock agar mayoritas request tidak block
     if symbol in _price_cache and now - _price_cache_time.get(symbol, 0) < _PRICE_TTL:
         return _price_cache[symbol]
 
     # IP masih di-ban — kembalikan stale cache daripada spam request
     if now < _ban_until:
-        if symbol in _price_cache:
-            logger.debug(f"[BINANCE] {symbol} ban aktif, pakai stale cache")
-            return _price_cache[symbol]
-        return None
+        logger.debug(f"[BINANCE] {symbol} ban aktif, pakai stale cache")
+        return _price_cache.get(symbol)
 
-    try:
-        async with session.get(
-            f"{BINANCE_HOST}/api/v3/ticker/price",
-            params={"symbol": ticker},
-            timeout=aiohttp.ClientTimeout(total=5),
-        ) as resp:
-            if resp.status in (418, 429):
-                _ban_until = now + _BAN_COOLDOWN
-                logger.warning(
-                    f"[BINANCE] Rate limit ({resp.status}) — pause {_BAN_COOLDOWN}s. "
-                    f"Pakai stale cache kalau ada."
-                )
-                return _price_cache.get(symbol)
-            resp.raise_for_status()
-            data = await resp.json()
-            price = float(data["price"])
-            _price_cache[symbol] = price
-            _price_cache_time[symbol] = now
-            logger.debug(f"[BINANCE] {symbol} = ${price:,.4f}")
-            return price
-    except Exception as e:
-        logger.warning(f"[BINANCE] Price fetch gagal {symbol}: {e}")
-        return _price_cache.get(symbol)  # stale fallback
+    # Lock per-symbol: cegah cache stampede dari asyncio.gather paralel
+    async with _get_price_lock(symbol):
+        # Re-cek setelah acquire lock — coroutine lain mungkin sudah update cache
+        now = datetime.now(timezone.utc).timestamp()
+        if symbol in _price_cache and now - _price_cache_time.get(symbol, 0) < _PRICE_TTL:
+            return _price_cache[symbol]
+        if now < _ban_until:
+            return _price_cache.get(symbol)
+
+        try:
+            async with session.get(
+                f"{BINANCE_HOST}/api/v3/ticker/price",
+                params={"symbol": ticker},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status in (418, 429):
+                    _ban_until = now + _BAN_COOLDOWN
+                    logger.warning(
+                        f"[BINANCE] Rate limit ({resp.status}) — pause {_BAN_COOLDOWN}s. "
+                        f"Pakai stale cache kalau ada."
+                    )
+                    return _price_cache.get(symbol)
+                resp.raise_for_status()
+                data = await resp.json()
+                price = float(data["price"])
+                _price_cache[symbol] = price
+                _price_cache_time[symbol] = now
+                logger.debug(f"[BINANCE] {symbol} = ${price:,.4f}")
+                return price
+        except Exception as e:
+            logger.warning(f"[BINANCE] Price fetch gagal {symbol}: {e}")
+            return _price_cache.get(symbol)  # stale fallback
 
 
 async def fetch_klines(
