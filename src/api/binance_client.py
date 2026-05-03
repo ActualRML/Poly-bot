@@ -125,6 +125,7 @@ async def fetch_klines(
     Return list of (open_time, open, high, low, close).
     Support historical via start_ms/end_ms (epoch ms).
     """
+    global _ban_until
     ticker = SYMBOL_MAP.get(symbol.upper())
     if not ticker:
         return []
