@@ -166,10 +166,23 @@ def save_position(pos: dict) -> int:
              :highest_price, :shares, :capital_at_risk, :resolve_date, :entry_time,
              :gap_pct, :kelly_fraction, :strategy_mode, :token_id)
         ON CONFLICT(condition_id, outcome) DO UPDATE SET
+            status          = 'open',
+            question        = excluded.question,
+            entry_price     = excluded.entry_price,
             current_price   = excluded.current_price,
             highest_price   = excluded.highest_price,
             shares          = excluded.shares,
-            capital_at_risk = excluded.capital_at_risk
+            capital_at_risk = excluded.capital_at_risk,
+            resolve_date    = excluded.resolve_date,
+            entry_time      = excluded.entry_time,
+            gap_pct         = excluded.gap_pct,
+            kelly_fraction  = excluded.kelly_fraction,
+            strategy_mode   = excluded.strategy_mode,
+            token_id        = excluded.token_id,
+            exit_price      = NULL,
+            exit_time       = NULL,
+            pnl_usdc        = NULL,
+            exit_reason     = NULL
     """
     # Normalize semua Decimal ke string
     normalized = {k: str(v) if isinstance(v, Decimal) else v for k, v in pos.items()}

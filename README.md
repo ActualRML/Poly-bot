@@ -38,18 +38,13 @@ cp .env.example .env.local
 ### Run bot
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m src.main
+python -m src.main
 ```
-
-> Windows PowerShell:
-> ```powershell
-> $env:PYTHONIOENCODING="utf-8"; python -m src.main
-> ```
 
 ### Monitor posisi live
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m script.monitor
+python -m script.monitor
 ```
 
 ### Recalibrate model (BTC/ETH/SOL/BNB)
@@ -63,6 +58,9 @@ PYTHONIOENCODING=utf-8 python -m script.recalibrate
 ```bash
 PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset BTC
 ```
+
+> `PYTHONIOENCODING=utf-8` hanya diperlukan untuk script backtest/recalibrate.
+> `src.main` dan `script.monitor` sudah auto-reconfigure encoding.
 
 ## Config
 

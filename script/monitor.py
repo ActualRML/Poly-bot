@@ -10,6 +10,10 @@ Jalankan:
 import sys
 from pathlib import Path
 
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -120,15 +124,13 @@ def main():
             q      = t.get("question", "")[:38]
             price  = float(t.get("price", 0))
             usdc   = float(t.get("usdc_amount", 0))
-            result = t.get("result", "")
-
-            # Emoji result
-            if result == "win":
-                result_label = "✅ WIN"
-            elif result == "lose":
-                result_label = "❌ LOSE"
-            else:
+            action_lower = t.get("action", "").lower()
+            if action_lower == "buy":
                 result_label = "⏳ OPEN"
+            elif action_lower in ("exit", "sell"):
+                result_label = "✅ WIN" if usdc > 0 else "❌ LOSE"
+            else:
+                result_label = ""
 
             print(f"   [{ts}] {action} {t['outcome']} {result_label} | "
                   f"{q} | @ {price:.3f} | ${usdc:.2f}")

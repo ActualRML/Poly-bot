@@ -12,6 +12,10 @@ import logging
 import re
 from decimal import Decimal
 
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import aiohttp
 from datetime import datetime, timezone
 from typing import Optional
@@ -776,7 +780,9 @@ async def run_mispricing_mode(clob: ClobClient):
                 await _resolve_checker(clob, gamma, manager, breaker, session)
 
                 if config.DRY_RUN:
-                    balance = float(config.SALDO_AWAL)
+                    from src.models.database import get_open_positions as _get_open
+                    locked = sum(float(p["capital_at_risk"]) for p in _get_open())
+                    balance = max(0.0, float(config.SALDO_AWAL) - locked)
                 else:
                     balance = clob.get_balance()
                 capital = balance

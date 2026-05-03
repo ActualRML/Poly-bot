@@ -29,9 +29,26 @@ Endpoint defaults sudah ada di `config.py`. **Jangan commit env files.**
 
 ---
 
-## Status Sistem (update: 2026-05-03, session 2)
+## Status Sistem (update: 2026-05-03, session 3)
 
 **Audit lengkap selesai** — 11 issue diidentifikasi & difix. Code aman untuk paper trade & live trading.
+
+### Bug Fixes (session 3)
+
+**`src/models/database.py` — `save_position()` ON CONFLICT bug**
+- Root cause: `ON CONFLICT DO UPDATE` tidak reset `status='open'` — posisi re-entry di market yang sebelumnya closed tetap `status='closed'` di DB, sehingga posisi tidak pernah tercatat open.
+- Fix: DO UPDATE sekarang reset seluruh entry fields (`status`, `entry_price`, `entry_time`, dll) dan clear exit fields (`exit_price`, `pnl_usdc`, dll).
+
+**`src/main.py` — DRY_RUN balance tidak akurat**
+- Root cause: `balance = float(config.SALDO_AWAL)` selalu $120 tanpa memperhitungkan modal di posisi open.
+- Fix: balance dikurangi total `capital_at_risk` dari open positions.
+
+**`src/main.py` + `script/monitor.py` — UTF-8 Windows**
+- Fix: auto-reconfigure stdout/stderr encoding ke UTF-8 saat startup. `PYTHONIOENCODING=utf-8` tidak lagi diperlukan untuk `src.main` dan `script.monitor`.
+
+**`script/monitor.py` — trade result label selalu "⏳ OPEN"**
+- Root cause: `t.get("result", "")` — kolom `result` tidak ada di `trades` table.
+- Fix: derive dari `action` + `usdc_amount` (EXIT + usdc>0 → ✅ WIN, EXIT + usdc≤0 → ❌ LOSE).
 
 ### Crypto Hourly Strategy
 
