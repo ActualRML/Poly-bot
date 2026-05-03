@@ -36,6 +36,7 @@ COINGECKO_IDS = {
     "SOL":  "solana",
     "XRP":  "ripple",
     "DOGE": "dogecoin",
+    "BNB":  "binancecoin",
 }
 
 

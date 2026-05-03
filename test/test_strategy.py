@@ -1,11 +1,11 @@
 """
 test/test_strategy.py
 ======================
-Unit test lengkap untuk pricing.py dan strategy.py.
+Unit test untuk pricing.py.
 
 Jalankan dengan:
-    python -m pytest tests/ -v
-    python -m pytest tests/ -v --tb=short
+    python -m pytest test/ -v
+    python -m pytest test/ -v --tb=short
 """
 
 import pytest
@@ -24,13 +24,6 @@ from src.logic.pricing import (
     HARGA_MINIMUM,
     HARGA_MAKSIMUM,
     SPREAD_MINIMUM_DEFAULT,
-)
-from src.logic.strategy import (
-    ScalarStrategy,
-    KonfigurasiStrategy,
-    SinyalTrade,
-    AlasanTidakTrade,
-    SinyalStrategi,
 )
 
 
@@ -196,123 +189,3 @@ class TestKalkulasiHargaPriceImprovement:
         assert hasil.ask_baru == Decimal("0.5001")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# TEST STRATEGY.PY
-# ═════════════════════════════════════════════════════════════════════════════
-
-class TestKonfigurasiStrategy:
-    def test_default(self):
-        k = KonfigurasiStrategy()
-        assert k.spread_minimum == SPREAD_MINIMUM_DEFAULT
-        assert k.jumlah_tick == 1
-        assert k.mode_satu_sisi == False
-
-    def test_spread_minimum_dari_string(self):
-        k = KonfigurasiStrategy(spread_minimum="0.005")
-        assert k.spread_minimum == Decimal("0.005")
-
-    def test_spread_nol_error(self):
-        with pytest.raises(ValueError):
-            KonfigurasiStrategy(spread_minimum=Decimal("0"))
-
-    def test_tick_nol_error(self):
-        with pytest.raises(ValueError):
-            KonfigurasiStrategy(jumlah_tick=0)
-
-
-class TestScalarStrategy:
-    @pytest.fixture
-    def strategy(self):
-        return ScalarStrategy()
-
-    @pytest.fixture
-    def strategy_ketat(self):
-        return ScalarStrategy(KonfigurasiStrategy(
-            spread_minimum=Decimal("0.0050"),
-            jumlah_tick=2,
-        ))
-
-    # ── Kasus normal ─────────────────────────────────────────────────────────
-
-    def test_sinyal_keduanya_spread_cukup(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.4500"), Decimal("0.4600"))
-        assert s.sinyal == SinyalTrade.KEDUANYA
-        assert s.harus_trade == True
-
-    def test_bid_ask_diusulkan_benar(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.4500"), Decimal("0.4600"))
-        assert s.bid_diusulkan == Decimal("0.4501")
-        assert s.ask_diusulkan == Decimal("0.4599")
-
-    def test_midpoint_benar(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.4500"), Decimal("0.4600"))
-        assert s.midpoint == Decimal("0.4550")
-
-    def test_spread_pasar_dalam_tick(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.3000"), Decimal("0.3200"))
-        assert s.spread_pasar_dalam_tick == 200
-
-    # ── Kasus tidak trade ────────────────────────────────────────────────────
-
-    def test_tidak_trade_spread_sempit(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.5000"), Decimal("0.5001"))
-        assert s.sinyal == SinyalTrade.TIDAK_ADA
-        assert s.harus_trade == False
-
-    def test_tidak_trade_crossed_market(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.5100"), Decimal("0.5000"))
-        assert s.sinyal == SinyalTrade.TIDAK_ADA
-        assert s.alasan_skip == AlasanTidakTrade.PASAR_CROSSED
-
-    def test_tidak_trade_harga_diluar_range(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0"), Decimal("0.5"))
-        assert s.sinyal == SinyalTrade.TIDAK_ADA
-        assert s.alasan_skip == AlasanTidakTrade.HARGA_DILUAR_RENTANG
-
-    def test_tidak_trade_konfigurasi_ketat(self, strategy_ketat):
-        # spread=10 tick, tapi min=50 tick → tidak trade
-        s = strategy_ketat.generate_sinyal(Decimal("0.4500"), Decimal("0.4510"))
-        assert s.sinyal == SinyalTrade.TIDAK_ADA
-
-    # ── Mode satu sisi ───────────────────────────────────────────────────────
-
-    def test_mode_satu_sisi_hasilkan_beli_atau_jual(self):
-        st = ScalarStrategy(KonfigurasiStrategy(mode_satu_sisi=True))
-        s  = st.generate_sinyal(Decimal("0.4500"), Decimal("0.4600"))
-        assert s.sinyal in (SinyalTrade.BELI, SinyalTrade.JUAL)
-
-    # ── Immutability ─────────────────────────────────────────────────────────
-
-    def test_sinyal_immutable(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.45"), Decimal("0.46"))
-        with pytest.raises((AttributeError, TypeError)):
-            s.sinyal = SinyalTrade.TIDAK_ADA  # type: ignore
-
-    # ── Pure function: deterministic ─────────────────────────────────────────
-
-    def test_deterministic(self, strategy):
-        """Input yang sama harus selalu menghasilkan output yang sama."""
-        bid, ask = Decimal("0.4500"), Decimal("0.4600")
-        hasil1 = strategy.generate_sinyal(bid, ask)
-        hasil2 = strategy.generate_sinyal(bid, ask)
-        assert hasil1.sinyal        == hasil2.sinyal
-        assert hasil1.bid_diusulkan == hasil2.bid_diusulkan
-        assert hasil1.ask_diusulkan == hasil2.ask_diusulkan
-
-    # ── Properti kalkulasi ───────────────────────────────────────────────────
-
-    def test_spread_kita_lebih_kecil_dari_spread_pasar(self, strategy):
-        s = strategy.generate_sinyal(Decimal("0.4000"), Decimal("0.4500"))
-        assert s.spread_kita < s.spread_pasar
-
-    def test_repr(self):
-        st = ScalarStrategy()
-        assert "ScalarStrategy" in repr(st)
-
-    # ── Analisa kondisi pasar ────────────────────────────────────────────────
-
-    def test_analisa_kondisi(self, strategy):
-        info = strategy.analisa_kondisi_pasar(Decimal("0.45"), Decimal("0.46"))
-        assert "spread" in info
-        assert "kondisi" in info
-        assert info["spread_cukup_untuk_trade"] in (True, False)

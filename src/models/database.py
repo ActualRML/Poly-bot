@@ -386,6 +386,23 @@ def resolve_prediction(condition_id: str, outcome: str, won: bool, resolve_price
         })
 
 
+def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
+    """
+    Ambil PnL dari N posisi terakhir yang sudah closed.
+    Return format: [{"pnl": float}, ...] ordered terlama ke terbaru.
+    Dipakai oleh calculate_position_size() di risk_manager.py.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT pnl_usdc FROM positions
+               WHERE status = 'closed' AND pnl_usdc IS NOT NULL
+               ORDER BY exit_time DESC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+    # Reversed: terlama [0] → terbaru [-1]
+    return [{"pnl": float(r["pnl_usdc"])} for r in reversed(rows)]
+
+
 def get_accuracy_report() -> dict:
     """
     Laporan kalibrasi model — seberapa akurat prediksi kita vs outcome nyata.

@@ -148,17 +148,23 @@ class MispricingDetector:
         yes_base_rates: list[BaseRate],
         no_base_rates: Optional[list[BaseRate]] = None,
         threshold: Optional[float] = None,
+        analyze_yes_only: bool = True,
     ) -> list[MispricingResult]:
         """
-        Analisis full satu market (Yes dan No).
-        Kalau no_base_rates tidak diberikan, otomatis di-invert dari yes_base_rates.
+        Analisis satu market.
+
+        Default `analyze_yes_only=True` — hanya analisis Yes side; caller akan
+        derive No-side decision dari direction (UNDERPRICED Yes ↔ buy Yes,
+        OVERPRICED Yes ↔ buy No). Hemat 50% compute.
+
+        Pass `analyze_yes_only=False` untuk analisis kedua sisi (mis. backtest
+        yang butuh raw No-side numbers).
 
         Args:
             threshold: override per-call, di-pass ke analyze().
         """
         from src.api.gamma_client import GammaClient
-        client = GammaClient()
-        prices = client.get_token_prices(market)
+        prices = GammaClient.get_token_prices(market)
 
         results = []
         condition_id = market.get("conditionId", market.get("id", "unknown"))
@@ -175,6 +181,9 @@ class MispricingDetector:
                 base_rates=yes_base_rates,
                 threshold=threshold,
             ))
+
+        if analyze_yes_only:
+            return results
 
         # Analisis NO — auto-invert kalau tidak disuplai
         no_price = prices.get("No")

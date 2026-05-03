@@ -23,8 +23,15 @@ from datetime import datetime, timezone
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-ASSETS              = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
-DAYS                = 90
+ASSETS              = ["BTC", "ETH", "SOL", "BNB"]
+# Per-asset window — BNB butuh 365d (regime kurang konsisten di window pendek),
+# yang lain cukup 90d untuk capture regime terkini.
+DAYS_BY_ASSET       = {
+    "BTC": 90,
+    "ETH": 90,
+    "SOL": 90,
+    "BNB": 365,
+}
 CORRECTION_MIN      = 0.05   # diff minimum untuk apply correction (5%)
 PROB_PATH           = _ROOT / "src" / "logic" / "probability.py"
 
@@ -47,9 +54,10 @@ def run_backtest(asset: str, barrier: bool = False) -> dict[float, float]:
     Jalankan satu backtest, parse Diff per target.
     Return {target_pct: correction} hanya untuk target yang over-estimate > CORRECTION_MIN.
     """
+    days = DAYS_BY_ASSET.get(asset, 90)
     cmd = [
         sys.executable, "-m", "script.backtest_mispricing",
-        "--days", str(DAYS),
+        "--days", str(days),
         "--asset", asset,
     ]
     if barrier:

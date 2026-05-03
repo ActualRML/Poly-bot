@@ -106,6 +106,9 @@ class SimulatorConfig:
     tight_trailing_pct: float   = 0.07
     days_hold_to_resolve: int   = 3
     max_days_stale: int         = 21
+    # Realism corrections (default ON — set 0 untuk reproduce old/biased behavior)
+    execution_lag_days: int     = 1         # decide at T, fill at T+lag (0 = look-ahead)
+    slippage_pct: float         = 0.01      # bid-ask haircut per side (0 = mid-price)
 
 
 # ─────────────────────────────────────────────
@@ -145,6 +148,34 @@ def _compute_rolling_drift(
         return 0.0
     n_days = window
     return math.log(end_price / start_price) / (n_days / 365.0)
+
+
+def _get_execution_price(
+    lookup: dict[date, float], decision_date: date, lag_days: int, max_search: int = 3,
+) -> Optional[float]:
+    """
+    Cari harga eksekusi di decision_date + lag_days, fallback ke beberapa hari ke depan
+    kalau weekend/data gap.
+    """
+    target = decision_date + timedelta(days=lag_days)
+    for delta in range(0, max_search + 1):
+        d = target + timedelta(days=delta)
+        if d in lookup:
+            return lookup[d]
+    return None
+
+
+def _apply_slippage(quoted_price: float, slippage: float, side: str) -> float:
+    """
+    side='buy'  → bayar lebih (cross spread): quoted + slippage
+    side='sell' → terima lebih sedikit: quoted - slippage
+    Clamp ke (0.001, 0.999) — gak bisa di luar range.
+    """
+    if side == "buy":
+        return min(0.999, quoted_price + slippage)
+    elif side == "sell":
+        return max(0.001, quoted_price - slippage)
+    raise ValueError(f"side must be 'buy' or 'sell', got {side}")
 
 
 def _resolve_pnl(outcome_bought: str, yes_won: bool, entry_price: float, shares: float, bet_usdc: float) -> tuple[float, str]:
@@ -215,10 +246,9 @@ async def simulate_market(
             cursor += timedelta(days=1)
             continue
 
-        # Skip kalau market price degenerate (already settled or illiquid)
-        if yes_market_price <= 0.02 or yes_market_price >= 0.98:
-            cursor += timedelta(days=1)
-            continue
+        # Degenerate: posisi terbuka harus tetap di-evaluate (force-exit di saturasi),
+        # tapi entry baru gak boleh dibuka. Used to skip everything (bug).
+        is_degenerate = yes_market_price <= 0.02 or yes_market_price >= 0.98
 
         drift = _compute_rolling_drift(spot_history_lookup, d, window=30)
 
@@ -236,13 +266,13 @@ async def simulate_market(
 
         # ── Update open position (kalau ada) ──────────────────────────────
         if open_position is not None:
-            # Compute current price untuk outcome yang dibeli
+            # Compute current price untuk outcome yang dibeli (decision-side, untuk eval)
             if open_outcome == "Yes":
-                current = yes_market_price
+                current_decision = yes_market_price
             else:
-                current = 1.0 - yes_market_price
+                current_decision = 1.0 - yes_market_price
 
-            open_position.current_price = ke_decimal(current)
+            open_position.current_price = ke_decimal(current_decision)
             open_position = exit_eval.update_highest_price(open_position)
 
             # Hack: ExitEvaluator pakai datetime.now() untuk days_to_resolve & days_held.
@@ -254,13 +284,35 @@ async def simulate_market(
             open_position.entry_time = now - timedelta(days=entry_age_days)
 
             decision = exit_eval.evaluate(open_position)
+            forced_signal = None
 
-            if decision.should_exit:
-                exit_price = current
+            # Force-exit kalau price saturated (live system would have closed via lock_profit)
+            if not decision.should_exit and is_degenerate:
+                if current_decision >= 0.98:
+                    forced_signal = "exit_lock_profit"
+                elif current_decision <= 0.02:
+                    forced_signal = "exit_trailing"
+
+            if decision.should_exit or forced_signal:
+                # Exit execution: cari harga di T+lag pada decision-side
+                if cfg.execution_lag_days > 0:
+                    exec_yes = _get_execution_price(
+                        yes_price_lookup, d, cfg.execution_lag_days, max_search=3,
+                    )
+                    if exec_yes is None:
+                        exec_yes = yes_market_price  # fallback ke today
+                    exit_decision_price = exec_yes if open_outcome == "Yes" else 1.0 - exec_yes
+                else:
+                    exit_decision_price = current_decision
+
+                # Apply slippage (sell side — terima lebih sedikit)
+                exit_price = _apply_slippage(exit_decision_price, cfg.slippage_pct, side="sell")
+
                 shares     = float(open_position.shares)
                 pnl_usdc   = shares * exit_price - open_bet_usdc
                 pnl_pct    = pnl_usdc / open_bet_usdc if open_bet_usdc > 0 else 0.0
                 days_held  = (cursor - open_entry_date).days if open_entry_date else 0
+                signal_value = forced_signal if forced_signal else decision.signal.value
 
                 trades.append(SimulatedTrade(
                     market_question     = market.question,
@@ -277,7 +329,7 @@ async def simulate_market(
                     shares              = shares,
                     exit_date           = cursor,
                     exit_market_price   = exit_price,
-                    exit_signal         = decision.signal.value,
+                    exit_signal         = signal_value,
                     pnl_usdc            = pnl_usdc,
                     pnl_pct             = pnl_pct,
                     days_held           = days_held,
@@ -291,53 +343,70 @@ async def simulate_market(
                 open_bet_usdc = None
                 open_entry_date = None
 
-        # ── Cek entry (kalau no posisi) ───────────────────────────────────
-        if open_position is None:
+        # ── Cek entry (kalau no posisi & price tidak degenerate) ──────────
+        if open_position is None and not is_degenerate:
             gap = model_prob - yes_market_price
 
             if abs(gap) > cfg.threshold:
                 if gap > 0:
-                    # Underpriced YES — buy YES
                     outcome_bought = "Yes"
-                    buy_price      = yes_market_price
+                    decision_price = yes_market_price
                     winrate        = model_prob
                 else:
-                    # Overpriced YES — buy NO
                     outcome_bought = "No"
-                    buy_price      = 1.0 - yes_market_price
+                    decision_price = 1.0 - yes_market_price
                     winrate        = 1.0 - model_prob
 
-                if 0.01 < buy_price < 0.99:
-                    kelly = sizer.calculate(
-                        winrate      = winrate,
-                        market_price = buy_price,
-                        capital      = cfg.capital_per_trade,
+                # Eksekusi di T+lag (kalau lag>0). Decision tetap di T (signal aja).
+                if cfg.execution_lag_days > 0:
+                    exec_yes = _get_execution_price(
+                        yes_price_lookup, d, cfg.execution_lag_days, max_search=3,
                     )
+                    if exec_yes is None:
+                        cursor += timedelta(days=1)
+                        continue
+                    exec_decision_price = exec_yes if outcome_bought == "Yes" else 1.0 - exec_yes
+                else:
+                    exec_decision_price = decision_price
 
-                    if kelly.bet_usdc > Decimal("0"):
-                        bet_usdc = float(kelly.bet_usdc)
-                        shares   = float(kelly.shares)
+                # Apply slippage (buy side — bayar lebih)
+                buy_price = _apply_slippage(exec_decision_price, cfg.slippage_pct, side="buy")
 
-                        # Build Position
-                        open_position = Position(
-                            condition_id    = market.condition_id,
-                            outcome         = outcome_bought,
-                            entry_price     = ke_decimal(buy_price),
-                            current_price   = ke_decimal(buy_price),
-                            highest_price   = ke_decimal(buy_price),
-                            shares          = ke_decimal(shares),
-                            capital_at_risk = ke_decimal(bet_usdc),
-                            resolve_date    = end,           # placeholder, di-override per-iteration
-                            entry_time      = cursor,        # placeholder
-                            question        = market.question,
-                            token_id        = market.yes_token_id if outcome_bought == "Yes" else market.no_token_id,
-                        )
-                        open_outcome = outcome_bought
-                        open_entry_market_price = buy_price
-                        open_entry_model_prob = model_prob
-                        open_entry_gap = gap
-                        open_bet_usdc = bet_usdc
-                        open_entry_date = cursor
+                # Skip kalau exec price degenerate post-shift
+                if not (0.01 < buy_price < 0.99):
+                    cursor += timedelta(days=1)
+                    continue
+
+                kelly = sizer.calculate(
+                    winrate      = winrate,
+                    market_price = buy_price,
+                    capital      = cfg.capital_per_trade,
+                )
+
+                if kelly.bet_usdc > Decimal("0"):
+                    bet_usdc = float(kelly.bet_usdc)
+                    shares   = float(kelly.shares)
+
+                    # Build Position
+                    open_position = Position(
+                        condition_id    = market.condition_id,
+                        outcome         = outcome_bought,
+                        entry_price     = ke_decimal(buy_price),
+                        current_price   = ke_decimal(buy_price),
+                        highest_price   = ke_decimal(buy_price),
+                        shares          = ke_decimal(shares),
+                        capital_at_risk = ke_decimal(bet_usdc),
+                        resolve_date    = end,           # placeholder, di-override per-iteration
+                        entry_time      = cursor,        # placeholder
+                        question        = market.question,
+                        token_id        = market.yes_token_id if outcome_bought == "Yes" else market.no_token_id,
+                    )
+                    open_outcome = outcome_bought
+                    open_entry_market_price = buy_price
+                    open_entry_model_prob = model_prob
+                    open_entry_gap = gap
+                    open_bet_usdc = bet_usdc
+                    open_entry_date = cursor
 
         cursor += timedelta(days=1)
 

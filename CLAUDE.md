@@ -1,210 +1,254 @@
 # Polymarket Trading Bot
 
-Bot ini adalah trading bot untuk Polymarket prediction market.
+Bot trading untuk Polymarket prediction market. **Crypto Hourly Strategy only.**
 
 ## Struktur
-- `src/main.py` → entry point
-- `src/logic/` → strategy, probability, kelly, dll
-- `src/api/` → Polymarket + external API clients (Kalshi, Manifold)
-- `src/utils/` → config, logger, telegram
-- `src/backtest/` → backtester market making
+- `src/main.py` → entry point + main loop async
+- `src/logic/` → strategy, probability, kelly, risk_manager, circuit_breaker, exit_strategy, mispricing, manager
+- `src/api/` → Polymarket CLOB, Gamma, Binance clients
+- `src/utils/` → config, logger, telegram_alert
+- `src/backtest/` → simulator components (polymarket_history, iv_history, question_parser, trade_simulator)
+- `src/models/` → database (SQLite), types
 - `script/backtest_mispricing.py` → backtest & kalibrasi model probabilitas
-- `script/recalibrate.py` → auto-recalibration job
-- `script/suggest_whitelist.py` → generator kandidat Polymarket↔Kalshi pair untuk review manual
+- `script/backtest_hourly_trades.py` → end-to-end hourly trade simulator
+- `script/recalibrate.py` → auto-recalibration job (BTC/ETH/SOL/BNB)
+- `script/monitor.py` → monitor posisi live
+
+## Config
+Dua file env (gitignored):
+- `.env.secret` → credentials (PK, CLOB_*, FRED, Telegram tokens)
+- `.env.local`  → strategy params (Kelly, risk, threshold, dll)
+- `.env.example` → template referensi (committed, aman)
+
+Endpoint defaults sudah ada di `config.py`. **Jangan commit env files.**
 
 ## Rules
-- Jangan modifikasi `.env*`
+- Jangan modifikasi `.env*` tanpa konfirmasi
 - Jangan commit API keys
 - Selalu test sebelum push
 
 ---
 
-## Status Sistem (update: 2026-04-27)
+## Status Sistem (update: 2026-05-03, session 2)
 
-### Crypto Strategy (mispricing)
+**Audit lengkap selesai** — 11 issue diidentifikasi & difix. Code aman untuk paper trade & live trading.
+
+### Crypto Hourly Strategy
 
 **Probability Model (`src/logic/probability.py`)**
-- Rolling drift 30 hari per titik evaluasi
+- Log-normal + barrier crossing model
 - `CALIBRATION_CORRECTION` dua tabel: `at_expiry` dan `barrier`
-- Corrections di-apply otomatis di `_calculate()` — semua caller pakai model terkalibrasi
-- Interpolasi linear untuk target_pct sembarang; correction = 0 kalau target < smallest point (default 3%)
-- Concurrent IV fetch: lock cover seluruh fetch, 12 paralel call → 1 HTTP request
+- Correction di-apply di kedua arah (above & below) — pakai `abs(target_pct)`, simetris
+- Interpolasi linear; correction = 0 kalau target < smallest point (default 3%)
+- `_barrier_prob` punya overflow guard untuk vol kecil + target jauh
 
-**Asset aktif: BTC, ETH, SOL** (XRP & DOGE excluded di `src/main.py`)
+**Asset aktif: BTC, ETH, SOL, BNB** (XRP & DOGE excluded — MAE >4%)
 
-**Kalibrasi (recalibrate 2026-04-27, window 90d, regime bearish kuat):**
+**IV Sources:**
+- Live realized vol: **Binance** 4h rolling (lower bound 2% — tidak reject signal di malam tenang)
+- Historical IV backtest: `src/backtest/iv_history.py`
+- Live price: Binance primary (30s cache), CoinGecko fallback (5m cache)
 
-| Asset | at_expiry max | barrier max |
-|---|---|---|
-| BTC | -8% @ +8% target | -17% @ +8% |
-| ETH | -10% @ +8% | -15% @ +8% |
-| SOL | -9% @ +8% | -18% @ +5% |
+**Kalibrasi terkini:**
 
-**Catatan:** corrections mungkin over-aggressive karena window 90d include fase bearish ekstrem (BTC drift -73% annualized). Kalau bot jarang signal setelah paper trade 2 minggu → re-kalibrasi dengan window lebih panjang (180d atau 365d).
+| Asset | at_expiry MAE | barrier MAE | Window | Tanggal |
+|---|---|---|---|---|
+| BTC | ~2-3% | ~3-4% | 90d | 2026-04-27 |
+| ETH | ~2-3% | ~3-4% | 90d | 2026-04-27 |
+| SOL | ~2-3% | ~3-4% | 90d | 2026-04-27 |
+| BNB | **1.3%** | **2.0%** | 365d | 2026-04-28 |
 
-### Political Strategy (multi-source + whitelist)
+---
 
-**Sumber data aktif (paralel) di `src/api/metaculus_client.py`:**
-- **Kalshi** — regulated US real money market, no auth, confidence 0.85
-- **Manifold** — play money, confidence 0.60
+### Dynamic Threshold (`src/logic/strategy.py`)
 
-**Flow di `political_mispricing.py`:**
-1. `is_political_market(question)` filter — exclude crypto + sports keywords
-2. `_is_whitelisted(condition_id)` check:
-   - Whitelist kosong → permissive (warn sekali per session)
-   - Whitelist ≥1 entry → strict (cuma condition_id terdaftar yang lanjut)
-3. `metaculus_client.search_all()` fetch Kalshi + Manifold paralel
-4. **Disagreement check** — kalau >1 sumber dan spread rate > 20%, skip
-5. Return `list[BaseRate]` → weighted average by confidence
-6. Gap > `POLITICAL_THRESHOLD` (0.08) → signal mispricing
+```
+threshold = vol_annual / sqrt(24) * 1.5   →  clamped [6%, 25%]
+```
 
-**Whitelist (`data/political_whitelist.json`):**
-- Format: `{"markets": {"<polymarket_condition_id>": "<kalshi_event_ticker>"}}`
-- Status: 1 entry (Kevin Warsh Fed Chair) → strict mode aktif
-- Generator: `python -m script.suggest_whitelist` → `data/whitelist_candidates.csv`
+| Vol (annual) | Threshold |
+|---|---|
+| 20% | 6.1% (floor) |
+| 40% (normal) | ~12.2% |
+| 70% (tinggi) | ~21.4% |
+| 100%+ | 25% (cap) |
 
-**Cache (in-memory, hilang saat restart):**
-- Kalshi bulk events: 30 menit | Manifold per query: 30 menit | Final blended: 30 menit
-- IV Deribit: 5 menit | CoinGecko crypto price: 5 menit
+`should_force_exit(expiry_time)` — trigger jual < 10 menit sebelum expiry.
 
-**Filter Kalshi:**
-- Category: Politics, Elections, World, Climate and Weather, Science and Technology, Economics
-- Skip provisional dan multivariate parlay (KXMVE*)
-- Hanya market `status="active"` dengan price valid
+---
+
+### Risk Manager (`src/logic/risk_manager.py`)
+
+**Dynamic trailing stop**:
+```
+stop = P * (1-P) * 2.0 × vol_scale   →  clamped [5%, 45%]
+```
+P mendekati 0/1 → stop ketat. P~0.5 → stop lebar.
+
+**Adaptive position size** (cap terhadap Kelly):
+- 2+ consecutive losses → cap **$10**
+- 3+ consecutive wins → cap **$30**
+- Default → **$20**
+
+**Catatan**: `MAX_CAPITAL_PER_MARKET=30%` di env memungkinkan cap $30 saat hot streak (sebelumnya 20% → bug, $30 selalu di-reject).
+
+---
+
+### Circuit Breaker (`src/logic/circuit_breaker.py`)
+
+**PnL-based** (`check()`):
+- Saklar 1: daily loss > 10% modal → pause sampai besok
+- Saklar 2: 3x consecutive loss → pause (manual reset)
+- Saklar 3: drawdown > 20% → emergency stop (manual reset)
+
+**Market-condition** (`check_safety_thresholds()`):
+- BTC realized vol > 100% annualized → halt entry baru
+- Daily drawdown < -15% → halt entry baru
+
+State: `data/circuit_breaker.json`. Audit log: `data/safety_halt.log`.
+
+**HANYA blokir entry baru.** Exit posisi tetap jalan walau CB aktif.
+
+---
 
 ### Lifecycle Posisi
 
 **Buka:**
 - `can_open()` cek seluruh market via `get_position_by_market()` (cegah beli YES+NO)
 - `open_position()` simpan `gap_pct`, `kelly_fraction`, `strategy_mode`, `token_id` ke DB
+- **`_open_position_lock`** mengwrap `can_open` → `open_position` (cegah race di `asyncio.gather`)
 
-**Update harga & exit:**
-- `_backfill_missing_token_ids()` jalan tiap cycle — cari posisi tanpa token_id, fetch dari Gamma, simpan
-- `_fetch_current_prices()` fetch best_bid dari CLOB pakai token_id, update DB
-- `evaluate_exits()` apply trailing stop / lock profit / stale check
+**Startup (sekali sebelum loop):**
 
-**Resolve & close:**
-- `_resolve_checker()` jalan tiap cycle:
-  - Settled normal: harga ≥0.98 atau ≤0.02 → auto-close
-  - Force-close: >24 jam lewat resolve & masih mid-range → close di bid sekarang
-  - Panggil `breaker.record_trade()` setelah close
+```
+STARTUP — jalankan sekali saat bot pertama start:
+  1. _backfill_missing_token_ids
+  2. reconcile_positions — sync posisi open vs Gamma API
+     - Cek SEMUA posisi open (bukan hanya yang expired)
+     - Tangkap early resolve & posisi stuck dari crash sebelumnya
+     - Fallback CLOB: close kalau best_bid ≥0.98 atau ≤0.02
+     - Timeout per posisi di-handle, bot tidak crash
+```
 
-### Dead/No-op
-- **Fed base rate (`src/logic/fed_fetcher.py`)**: ambil Polymarket price sebagai base rate untuk market yang sama → gap selalu ~0. Disable di baris 154-157 `_get_base_rates` kalau mau hemat HTTP call.
+**Per-cycle (urutan dalam main loop):**
+
+```
+EXIT BLOCK — selalu jalan, tidak diblokir CB:
+  1. _backfill_missing_token_ids
+  2. _resolve_checker  (hanya posisi expire_date < now)
+  3. balance display + summary
+  4. _build_vol_data (Binance realized vol BTC/ETH/SOL/BNB)
+  5. _fetch_current_prices (CLOB best_bid pakai token_id)
+  6. dynamic trailing stop update
+  7. _force_exit_check (< 10 menit sebelum expiry)
+  8. evaluate_exits (trailing stop / lock profit)
+
+ENTRY BLOCK — hanya kalau CB & safety OK:
+  9. CB check → continue kalau triggered
+  10. _prefetch_prices (cache crypto prices)
+  11. ascan_hourly_opportunities
+  12. safety check (vol > 100% atau drawdown < -15%)
+  13. _analyze_market × N (asyncio.gather, lock per entry)
+```
+
+**Resolve checker vs reconcile_positions:**
+
+| | `_resolve_checker` | `reconcile_positions` |
+|---|---|---|
+| Kapan jalan | Setiap cycle | Sekali saat startup |
+| Syarat posisi | `resolve_date < now` | Semua posisi open |
+| Tangkap early resolve | ❌ | ✅ |
+
+**Resolve checker:**
+- Harga ≥0.98 atau ≤0.02 → auto-close (resolved)
+- >24 jam lewat resolve & harga mid-range → force close di bid sekarang
+
+**Order book kosong:**
+- Muncul saat market near-resolved tapi Gamma belum `closed=True`
+- Bot tetap jalan — exit eval pakai harga terakhir dari DB
+- `reconcile_positions` saat restart akan catch posisi ini via CLOB fallback
+
+---
+
+### Market Filter (`src/api/gamma_client.py`)
+
+`ascan_hourly_opportunities` filter urutan:
+1. Status — skip `closed/active=false/archived/resolved`
+2. Order book — skip `enableOrderBook=false`
+3. Kategori — skip sports/entertainment/music/awards/tv/movies/gaming
+4. Volume — skip < `HOURLY_MIN_MARKET_VOLUME` ($500)
+5. Liquidity — skip < `HOURLY_MIN_LIQUIDITY` ($200)
+6. Time window — skip di luar `[HOURLY_MIN_MINUTES_TO_RESOLVE, HOURLY_MAX_MINUTES_TO_RESOLVE]`
+
+`get_token_prices` & `extract_token_ids` adalah `@staticmethod` — tidak butuh client instance.
+
+---
+
+### Mispricing Detector (`src/logic/mispricing.py`)
+
+`analyze_market(analyze_yes_only=True)` default — hanya analisis Yes side. Caller derive No-side decision dari direction (UNDERPRICED Yes ↔ buy Yes, OVERPRICED Yes ↔ buy No). Hemat 50% compute.
+
+Pass `analyze_yes_only=False` di backtest yang butuh raw No-side numbers.
+
+---
 
 ### `script/recalibrate.py`
-- Run backtest semua asset (BTC/ETH/SOL/XRP/DOGE) at_expiry + barrier, update `CALIBRATION_CORRECTION` di `probability.py`, notif Telegram
-- **Wajib `PYTHONIOENCODING=utf-8`** di Windows (env override otomatis untuk subprocess, tapi prepend kalau jalan manual)
+- Run backtest BTC/ETH/SOL/BNB → update `CALIBRATION_CORRECTION` di `probability.py` → notif Telegram
+- Per-asset window: BTC/ETH/SOL = 90d, BNB = 365d (`DAYS_BY_ASSET` dict)
+- **Wajib `PYTHONIOENCODING=utf-8`** di Windows
 - Cron VPS: `0 2 1 * * cd /path/to/bot && PYTHONIOENCODING=utf-8 python -m script.recalibrate`
-- **Status**: script siap, cron belum dipasang — tunggu VPS aktif
+- **Status**: script siap, cron belum dipasang
 
 ---
 
-## Crypto Trade Simulator (2026-04-28)
+## Paper Trade
 
-End-to-end trade backtest, terpisah dari `main.py`. Simulasi full lifecycle entry→exit→resolve pakai data historis Polymarket + Deribit IV + CoinGecko spot.
+**Status: AKTIF** — `DRY_RUN=True`, modal virtual $120.
 
-**File baru (semua isolated, ga touch live system):**
-- `script/backtest_crypto_trades.py` — CLI entry
-- `src/backtest/polymarket_history.py` — closed markets via Gamma + price history via CLOB `/prices-history`
-- `src/backtest/iv_history.py` — Deribit DVOL historis (BTC/ETH) + realized vol fallback (SOL)
-- `src/backtest/question_parser.py` — strict filter (skip "X or Y first", multivariate, dll)
-- `src/backtest/trade_simulator.py` — core simulator (reuse `probability.py` + `kelly.py` + `exit_strategy.py`)
-- `data/backtest_cache/` — disk cache (re-run instant, TTL 24h–7d)
-- `data/backtest_results/trades_*.csv` + `summary_*.txt`
-
-**Hasil first-run 365d window:** 214 trades, ROI +12.81%, win rate 50.9%. **JANGAN trust angka ini sebelum validasi point #1 di Next Steps.**
-
-**Run:**
-```bash
-PYTHONIOENCODING=utf-8 python -m script.backtest_crypto_trades --days 365
-PYTHONIOENCODING=utf-8 python -m script.backtest_crypto_trades --days 90 --threshold 0.10
+Log per cycle:
+```
+[VOL] BTC 45% | ETH 42% | SOL 68% | BNB 33% (annualized)
+Hourly scan: 9/64 lolos | skip: status=31 ...
+SIGNAL  Will BTC be above $90k... | BUY No @ 0.32 | Gap 13.8% | Winrate 83% | Kelly $8.40 (7.0%) | EV 0.14
 ```
 
-**Caveats:**
-- CoinGecko free cap 365d → ga bisa langsung ke 5 tahun tanpa ganti spot source (Binance klines)
-- Deribit DVOL cuma BTC + ETH; SOL pakai realized vol → mungkin under-estimate IV
-- Banyak entry_prob = 0.999 (long-dated near-money) → model degenerate, sinyal valid tapi over-confident
-- Re-entry instant after stop-loss (214 trades / 192 markets)
+**Stop criteria:**
+- Winrate < 55% setelah 20+ trade → naikkan threshold multiplier ke 2.0
+- ROI < -5% setelah 5+ trade → review config, stop paper trade
 
 ---
 
-## Next Steps (prioritas — research dulu sebelum paper trade)
+## Next Steps
 
-1. **Validasi backtest bukan bug** (BLOCKER sebelum trust angka ROI)
-   - Spot-check 5–10 trades manual lawan Polymarket historical chart
-   - Audit look-ahead bias: `fidelity=1440` (daily candle) → entry "hari T" pakai close-of-T, padahal live cuma punya open-of-T. Bias mungkin overstate ROI 1–3%
-   - Cek resolution timing: market endDate scheduled vs actual close (banyak yang resolve early)
+1. **Monitor paper trade** — kumpulkan 20+ trade, cek winrate & ROI
+2. **Re-backtest** dengan dynamic threshold (sebelumnya backtest pakai threshold 20% statis)
+3. **Setup cron recalibrate** di VPS
+4. **Go live** setelah paper trade menunjukkan edge nyata
 
-2. **Decompose source of edge** (kalau valid, masih perlu tau dari mana edge-nya)
-   - Stratify by entry_prob bucket: 0.5–0.7, 0.7–0.9, 0.9+. Kalau profit cuma dari 0.9+ → strategy efektifnya "buy near-resolve YES at discount", bukan mispricing detection
-   - Per-quarter breakdown ROI → cek apakah edge konsisten atau cuma 1 regime
-
-3. **Baseline comparison** (tanpa baseline, +12.81% gak punya makna)
-   - Naive long-YES (beli setiap market di entry, hold ke resolve) — ROI berapa?
-   - Naive long-high-prob (beli kalau market_price > 0.7) — ROI?
-   - Kalau strategy ≤ baseline → gap detection ga add value
-
-4. **Decision point setelah point 1–3 clean:**
-   - Path A: Extend ke 5 tahun (perlu Binance klines + handle sparse Polymarket data pre-2024)
-   - Path B: Go live paper trade (skip extended backtest, real-money validation)
-
-5. **Paper trade crypto 2 minggu** — defer sampai point 1–3 done
-6. **Paper trade political 1 bulan** — defer
-7. **Setup cron recalibrate di VPS** — setelah VPS aktif
-8. **Go live** — setelah backtest validated + paper trade clean
-
----
-
-## Roadmap: EXIT_EDGE_REVERSED Signal
-
-Exit sekarang reaktif terhadap Polymarket price (trailing stop). Ide: exit proaktif jika probability model re-kalkulasi dengan harga terkini turun signifikan dari entry probability.
-
-```
-entry_prob   = 54%  (disimpan saat posisi dibuka)
-current_prob = recalculate(harga BTC sekarang) = 15%
-drop = 39% > threshold (20%) → EXIT_EDGE_REVERSED
-```
-
-**Yang perlu dibangun:**
-1. Simpan `entry_prob` ke DB saat `open_position()` (schema migration)
-2. Re-kalkulasi probability di exit evaluation
-3. Tambah `EXIT_EDGE_REVERSED` signal di `src/logic/exit_strategy.py`
-4. Config: `EDGE_REVERSAL_THRESHOLD=0.20`
-
-**Kapan:** setelah paper trade selesai — evaluasi dulu apakah trailing stop sudah cukup.
+**Roadmap: EXIT_EDGE_REVERSED (defer)**
+Exit proaktif kalau model probability turun signifikan dari saat entry. Butuh: simpan `entry_prob` ke DB, re-kalkulasi di exit evaluation. Evaluasi dulu apakah trailing stop sudah cukup.
 
 ---
 
 ## Cara Kalibrasi
 
-**Otomatis (recommended):**
+**Otomatis:**
 ```bash
 PYTHONIOENCODING=utf-8 python -m script.recalibrate
 ```
 
 **Manual per asset:**
 ```bash
-# at-expiry
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset BTC
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset ETH
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset SOL
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90  --asset BTC
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90  --asset ETH
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90  --asset SOL
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 365 --asset BNB
 
 # barrier
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90 --asset BTC
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90 --asset ETH
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90 --asset SOL
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90  --asset BTC
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90  --asset ETH
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 90  --asset SOL
+PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --barrier --days 365 --asset BNB
 ```
 
-Re-kalibrasi setiap **30–60 hari** atau saat regime berubah drastis. Ganti `--days 180` kalau 90d terlalu noisy.
-
----
-
-## Cara Generate Whitelist Kandidat
-
-```bash
-python -m script.suggest_whitelist          # default 5 pages
-python -m script.suggest_whitelist --pages 10  # coverage penuh
-```
-
-Output: `data/whitelist_candidates.csv` — sort by similarity desc, manual verify topik benar-benar sama, copy ke `data/political_whitelist.json` field `"markets"`.
+Re-kalibrasi setiap 30–60 hari atau saat regime berubah drastis.

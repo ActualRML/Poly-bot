@@ -40,6 +40,7 @@ COINGECKO_IDS = {
     "SOL":  "solana",
     "XRP":  "ripple",
     "DOGE": "dogecoin",
+    "BNB":  "binancecoin",
 }
 
 VOLATILITAS_FALLBACK = {
@@ -48,6 +49,7 @@ VOLATILITAS_FALLBACK = {
     "SOL":  0.80,
     "XRP":  0.70,
     "DOGE": 0.95,
+    "BNB":  0.55,
 }
 
 
