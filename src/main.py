@@ -691,6 +691,14 @@ _UPDOWN_SERIES = {
     "XRP": "10100",
 }
 
+_UPDOWN_HOURLY_SLUG_PREFIXES = {
+    "BTC": "bitcoin-up-or-down-",
+    "ETH": "ethereum-up-or-down-",
+    "SOL": "solana-up-or-down-",
+    "XRP": "xrp-up-or-down-",
+}
+_UPDOWN_HOURLY_SKIP_MARKERS = ("-5m-", "-15m-", "-4h-", "updown-5m", "updown-15m", "updown-4h")
+
 async def _scan_updown_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
     import json as _json
     results = []
@@ -921,6 +929,270 @@ async def _analyze_updown_market(
                     "resolve_date":   resolve_date.isoformat(),
                 })
 
+async def _scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
+    import json as _json
+
+    results = []
+    now     = datetime.now(timezone.utc)
+
+    try:
+        batch = await gamma._aget(
+            "/events",
+            session,
+            params={
+                "closed":    "false",
+                "limit":     100,
+                "order":     "endDate",
+                "ascending": "true",
+            },
+        )
+    except Exception as e:
+        logger.debug(f"[UPDOWN HOURLY] Gagal fetch events: {e}")
+        return results
+
+    if not isinstance(batch, list):
+        return results
+
+    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
+    max_min = getattr(config, "HOURLY_MAX_MINUTES_TO_RESOLVE", 90)
+
+    for event in batch:
+        slug = (event.get("slug") or "").lower()
+
+        symbol = None
+        for sym, prefix in _UPDOWN_HOURLY_SLUG_PREFIXES.items():
+            if slug.startswith(prefix):
+                symbol = sym
+                break
+        if not symbol:
+            continue
+
+        if any(m in slug for m in _UPDOWN_HOURLY_SKIP_MARKERS):
+            continue
+
+        end_date_str   = event.get("endDate") or ""
+        start_date_str = event.get("startDate") or ""
+        try:
+            end_date   = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+
+        minutes_left = (end_date - now).total_seconds() / 60
+        if minutes_left < min_min or minutes_left > max_min:
+            continue
+
+        mkts = event.get("markets", [])
+        if not mkts:
+            continue
+        mkt = mkts[0]
+
+        outcomes = mkt.get("outcomes", [])
+        if isinstance(outcomes, str):
+            try: outcomes = _json.loads(outcomes)
+            except: outcomes = []
+        op = mkt.get("outcomePrices", [])
+        if isinstance(op, str):
+            try: op = _json.loads(op)
+            except: op = []
+
+        outcomes_lower = [str(o).lower() for o in outcomes]
+        if "up" not in outcomes_lower or not op:
+            continue
+
+        mkt["_symbol"]     = symbol
+        mkt["_start_date"] = start_date.isoformat()
+        mkt["endDate"]     = end_date_str
+        results.append(mkt)
+
+    return results
+
+async def _analyze_updown_hourly_market(
+    market: dict, clob, gamma, sizer, manager,
+    breaker, capital: float, session: aiohttp.ClientSession,
+    vol_data: dict | None = None,
+):
+    import json as _json
+    from src.logic.updown_strategy import calculate_updown_probability_hourly
+    from src.logic.pricing import ke_decimal
+
+    symbol = market.get("_symbol", "")
+    if not symbol:
+        return
+
+    condition_id = market.get("conditionId", market.get("id", ""))
+    question     = market.get("question", market.get("title", f"{symbol} Up or Down Hourly"))
+
+    outcomes = market.get("outcomes", [])
+    op       = market.get("outcomePrices", [])
+    if isinstance(outcomes, str):
+        try: outcomes = _json.loads(outcomes)
+        except: outcomes = []
+    if isinstance(op, str):
+        try: op = _json.loads(op)
+        except: op = []
+
+    outcomes_lower = [str(o).lower() for o in outcomes]
+    if "up" not in outcomes_lower or not op:
+        return
+    try:
+        up_idx          = outcomes_lower.index("up")
+        market_price_up = float(op[up_idx])
+    except (ValueError, IndexError):
+        return
+
+    if market_price_up <= 0 or market_price_up >= 1:
+        return
+
+    end_date_str   = market.get("endDate", "")
+    start_date_str = market.get("_start_date", "")
+    try:
+        end_date   = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
+    except Exception:
+        return
+
+    delta_sec = (end_date - datetime.now(timezone.utc)).total_seconds()
+    if delta_sec <= 0:
+        return
+
+    prob_up = await calculate_updown_probability_hourly(
+        symbol, session, vol_data or {}, end_date, start_date
+    )
+    if prob_up is None:
+        return
+
+    edge      = prob_up - market_price_up
+    threshold = getattr(config, "UPDOWN_HOURLY_THRESHOLD", getattr(config, "UPDOWN_THRESHOLD", 0.05))
+
+    if abs(edge) < threshold:
+        logger.debug(f"[UPDOWN HOURLY] {symbol} edge={edge:+.3f} < {threshold:.2f} — skip")
+        return
+
+    if edge > 0:
+        buy_outcome = "Up"
+        buy_price   = market_price_up
+        buy_winrate = prob_up
+    else:
+        buy_outcome = "Down"
+        buy_price   = round(1.0 - market_price_up, 4)
+        buy_winrate = round(1.0 - prob_up, 4)
+
+    if buy_price <= 0 or buy_price >= 1:
+        return
+
+    min_wr = getattr(config, "HOURLY_MIN_WINRATE_STRICT", 0.75)
+    if buy_winrate < min_wr:
+        logger.debug(f"[UPDOWN HOURLY] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
+        return
+
+    kelly = sizer.calculate(
+        winrate      = buy_winrate,
+        market_price = buy_price,
+        capital      = capital,
+    )
+
+    if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
+        return
+
+    max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
+    if float(kelly.bet_usdc) > max_size:
+        from dataclasses import replace as _dc_replace
+        capped_usdc   = Decimal(str(max_size))
+        capped_shares = (capped_usdc / Decimal(str(buy_price))).quantize(Decimal("0.0001"))
+        kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
+
+    t_min = delta_sec / 60.0
+    log.info(
+        f"[bold cyan][UPDOWN HOURLY][/bold cyan] {symbol} {t_min:.0f}m left | "
+        f"BUY {buy_outcome} @ {buy_price:.3f} | "
+        f"P(Up)={prob_up:.3f} Mkt={market_price_up:.3f} Edge={edge:+.3f} | "
+        f"Kelly ${float(kelly.bet_usdc):.2f}"
+    )
+
+    tokens   = gamma.extract_token_ids(market)
+    token    = next((t for t in tokens if t["outcome"] == buy_outcome), None)
+    token_id = str(token["token_id"]) if token and token.get("token_id") else ""
+
+    async with _open_position_lock:
+        can_open, reason = manager.can_open(
+            condition_id  = condition_id,
+            outcome       = buy_outcome,
+            bet_usdc      = kelly.bet_usdc,
+            total_capital = ke_decimal(capital),
+        )
+        if not can_open:
+            logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} {buy_outcome}: {reason}")
+            return
+
+        if not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+            return
+
+        try:
+            resolve_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        except Exception:
+            resolve_date = datetime.now(timezone.utc)
+
+        if config.DRY_RUN:
+            log.warning("[yellow][UPDOWN HOURLY] DRY RUN — simulasi posisi dibuka[/yellow]")
+            manager.open_position(
+                condition_id    = condition_id,
+                question        = question,
+                outcome         = buy_outcome,
+                entry_price     = ke_decimal(buy_price),
+                shares          = kelly.shares,
+                capital_at_risk = kelly.bet_usdc,
+                resolve_date    = resolve_date,
+                gap_pct         = abs(edge),
+                kelly_fraction  = float(kelly.bet_fraction),
+                strategy_mode   = "updown_hourly_dry_run",
+                token_id        = token_id,
+            )
+            log_prediction({
+                "condition_id":   condition_id,
+                "question":       question,
+                "outcome":        buy_outcome,
+                "predicted_prob": str(round(buy_winrate, 4)),
+                "market_price":   str(buy_price),
+                "gap_pct":        str(round(abs(edge) * 100, 2)),
+                "resolve_date":   resolve_date.isoformat(),
+            })
+        else:
+            if not token_id:
+                logger.warning(f"[UPDOWN HOURLY] token_id tidak ditemukan untuk {buy_outcome}")
+                return
+
+            order = clob.pasang_order(
+                sisi     = SisiOrder.BELI,
+                harga    = ke_decimal(buy_price),
+                ukuran   = kelly.shares,
+                token_id = token_id,
+            )
+
+            if order:
+                manager.open_position(
+                    condition_id    = condition_id,
+                    question        = question,
+                    outcome         = buy_outcome,
+                    entry_price     = ke_decimal(buy_price),
+                    shares          = kelly.shares,
+                    capital_at_risk = kelly.bet_usdc,
+                    resolve_date    = resolve_date,
+                    gap_pct         = abs(edge),
+                    kelly_fraction  = float(kelly.bet_fraction),
+                    strategy_mode   = "updown_hourly",
+                    token_id        = token_id,
+                )
+                log_prediction({
+                    "condition_id":   condition_id,
+                    "question":       question,
+                    "outcome":        buy_outcome,
+                    "predicted_prob": str(round(buy_winrate, 4)),
+                    "market_price":   str(buy_price),
+                    "gap_pct":        str(round(abs(edge) * 100, 2)),
+                    "resolve_date":   resolve_date.isoformat(),
+                })
+
 async def run_mispricing_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     detector = MispricingDetector(threshold=getattr(config, "HOURLY_MISPRICING_THRESHOLD", 0.12))
@@ -953,7 +1225,7 @@ async def run_mispricing_mode(clob: ClobClient):
     )
 
     log.info(
-        f"[bold green]Daily crypto + Up/Down Daily strategy aktif (async).[/bold green] "
+        f"[bold green]Daily Crypto + Up/Down Daily + Up/Down Hourly aktif.[/bold green] "
         f"Threshold: dynamic [6-25%] | "
         f"Min winrate: {getattr(config, 'HOURLY_MIN_WINRATE_STRICT', 0.75):.0%} | "
         f"Polling: {config.POLLING_INTERVAL}s"
@@ -1059,7 +1331,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     min_minutes_to_resolve = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5),
                     limit                  = 500,
                 )
-                log.info(f"Daily scan: {len(markets)} market lolos filter")
 
                 daily_drawdown = breaker.state.daily_loss / breaker.starting_capital
                 safety         = breaker.check_safety_thresholds(btc_vol, daily_drawdown)
@@ -1075,6 +1346,8 @@ async def run_mispricing_mode(clob: ClobClient):
 
                 cb_ok = breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade
                 if cb_ok and not safety.halt_new_entries:
+                    log.info("[bold]── DAILY CRYPTO ─────────────────────────────────[/bold]")
+                    log.info(f"Scan: {len(markets)} market lolos filter")
                     results = await asyncio.gather(*[
                         _analyze_market(
                             market, clob, gamma, detector, sizer, manager,
@@ -1086,9 +1359,9 @@ async def run_mispricing_mode(clob: ClobClient):
                         if isinstance(r, Exception):
                             logger.warning(f"[ANALYZE] Error di market analysis: {str(r).replace('[', '\\[')}")
 
+                    log.info("[bold]── UP/DOWN DAILY ────────────────────────────────[/bold]")
                     updown_markets = await _scan_updown_markets(session, gamma)
-                    if updown_markets:
-                        log.info(f"[UPDOWN] {len(updown_markets)} active Up/Down Daily markets")
+                    log.info(f"[UPDOWN DAILY] {len(updown_markets)} active market")
                     for ud_mkt in updown_markets:
                         try:
                             await _analyze_updown_market(
@@ -1096,7 +1369,19 @@ async def run_mispricing_mode(clob: ClobClient):
                                 breaker, capital, session, vol_data=vol_data,
                             )
                         except Exception as e:
-                            logger.warning(f"[UPDOWN] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
+                            logger.warning(f"[UPDOWN DAILY] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
+
+                    log.info("[bold]── UP/DOWN HOURLY ───────────────────────────────[/bold]")
+                    hourly_markets = await _scan_updown_hourly_markets(session, gamma)
+                    log.info(f"[UPDOWN HOURLY] {len(hourly_markets)} active market")
+                    for hm in hourly_markets:
+                        try:
+                            await _analyze_updown_hourly_market(
+                                hm, clob, gamma, sizer, manager,
+                                breaker, capital, session, vol_data=vol_data,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")
 
             except asyncio.CancelledError:
                 raise
