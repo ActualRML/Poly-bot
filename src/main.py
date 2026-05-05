@@ -103,10 +103,11 @@ async def _build_vol_data(session: aiohttp.ClientSession) -> dict:
         fetch_realized_vol("ETH", session, hours=vol_hours),
         fetch_realized_vol("SOL", session, hours=vol_hours),
         fetch_realized_vol("BNB", session, hours=vol_hours),
+        fetch_realized_vol("XRP", session, hours=vol_hours),
         return_exceptions=True,
     )
     vol_data: dict = {"DEFAULT": 0.40}
-    for symbol, result in zip(["BTC", "ETH", "SOL", "BNB"], results):
+    for symbol, result in zip(["BTC", "ETH", "SOL", "BNB", "XRP"], results):
         if isinstance(result, float) and result > 0:
             vol_data[symbol] = result
     return vol_data
@@ -1256,7 +1257,8 @@ async def run_mispricing_mode(clob: ClobClient):
                     f"[VOL] BTC {btc_vol:.0%} | "
                     f"ETH {vol_data.get('ETH', 0.40):.0%} | "
                     f"SOL {vol_data.get('SOL', 0.40):.0%} | "
-                    f"BNB {vol_data.get('BNB', 0.40):.0%} (annualized)"
+                    f"BNB {vol_data.get('BNB', 0.40):.0%} | "
+                    f"XRP {vol_data.get('XRP', 0.40):.0%} (annualized)"
                 )
 
                 current_prices = await _fetch_current_prices(clob, manager)
