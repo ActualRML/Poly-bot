@@ -1,11 +1,3 @@
-"""
-scripts/monitor.py
-==================
-Script monitoring harian — jalankan sekali sehari untuk lihat status bot.
-
-Jalankan:
-    python -m script.monitor
-"""
 
 import sys
 from pathlib import Path
@@ -28,7 +20,6 @@ from src.models.database import (
     get_stats,
 )
 
-
 def main():
     now = datetime.now(timezone.utc)
     print("=" * 65)
@@ -36,7 +27,6 @@ def main():
     print(f"  {now.strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 65)
 
-    # ── Stats keseluruhan ──────────────────────────────────────
     stats  = get_stats()
     total  = stats.get("total_trades") or 0
     pnl    = stats.get("total_pnl") or 0
@@ -50,7 +40,6 @@ def main():
     print(f"   Winrate       : {wr:.1f}%")
     print(f"   Total PnL     : ${pnl:+.2f}")
 
-    # ── Posisi open ────────────────────────────────────────────
     positions = get_open_positions()
     print(f"\n📂 OPEN POSITIONS ({len(positions)}/5)")
 
@@ -66,21 +55,18 @@ def main():
             shares  = float(pos["shares"])
             capital = float(pos["capital_at_risk"])
             _gap_raw = float(pos.get("gap_pct") or 0)
-            # gap_pct disimpan sebagai fraction (0.185 = 18.5%)
+
             gap_pct  = _gap_raw * 100 if _gap_raw <= 1.0 else _gap_raw
 
-            # PnL unrealized
             pnl_pos = (current - entry) * shares
             pnl_pct = (current - entry) / entry * 100 if entry > 0 else 0
 
-            # Estimasi profit kalau resolve menang (harga → $1)
             profit_if_win = (1.0 - entry) * shares
             profit_if_lose = -capital
 
             total_capital_at_risk += capital
             total_unrealized_pnl  += pnl_pos
 
-            # Days to resolve
             resolve_str = pos.get("resolve_date", "")
             try:
                 resolve = datetime.fromisoformat(resolve_str)
@@ -91,7 +77,6 @@ def main():
             except Exception:
                 resolve_label = "?"
 
-            # Status emoji
             if pnl_pct > 5:
                 status = "📈"
             elif pnl_pct < -5:
@@ -112,7 +97,6 @@ def main():
         print(f"   Total at risk : ${total_capital_at_risk:.2f}")
         print(f"   Unrealized PnL: ${total_unrealized_pnl:+.2f}")
 
-    # ── Trade history terbaru ──────────────────────────────────
     trades = get_trade_history(limit=5)
     print(f"\n📋 LAST 5 TRADES")
     if not trades:
@@ -135,7 +119,6 @@ def main():
             print(f"   [{ts}] {action} {t['outcome']} {result_label} | "
                   f"{q} | @ {price:.3f} | ${usdc:.2f}")
 
-    # ── Quick analysis ─────────────────────────────────────────
     if positions:
         print(f"\n💡 QUICK ANALYSIS")
         def _edge(p):
@@ -156,7 +139,6 @@ def main():
     print("  Jalankan bot : python -m src.main")
     print("  Reset DB     : python -c \"import sqlite3; conn=sqlite3.connect('data/bot_database.db'); conn.execute('DELETE FROM positions'); conn.execute('DELETE FROM trades'); conn.commit()\"")
     print("=" * 65)
-
 
 if __name__ == "__main__":
     main()

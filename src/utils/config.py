@@ -1,24 +1,13 @@
-"""
-src/utils/config.py
-===================
-Loader konfigurasi dari file .env menggunakan python-dotenv.
-
-Semua konfigurasi runtime dibaca dari sini.
-Tidak ada hardcoded value di tempat lain.
-"""
 
 import os
 from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 
-
-# Load .env dari root proyek
 _ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_ROOT / ".env.secret")  # credentials — prioritas pertama
-load_dotenv(_ROOT / ".env.local")   # settings/strategy
-load_dotenv(_ROOT / ".env")         # fallback
-
+load_dotenv(_ROOT / ".env.secret")
+load_dotenv(_ROOT / ".env.local")
+load_dotenv(_ROOT / ".env")
 
 def _get(key: str, default: str = "") -> str:
     return os.getenv(key, default)
@@ -35,13 +24,8 @@ def _get_bool(key: str, default: bool) -> bool:
 def _get_float(key: str, default: float) -> float:
     return float(os.getenv(key, str(default)))
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KONFIGURASI
-# ─────────────────────────────────────────────────────────────────────────────
-
 class Config:
-    # --- AUTHENTICATION & API KEYS ---
+
     PK_PRIVATE_KEY     : str = _get("PK_PRIVATE_KEY")
     API_KEY            : str = _get("CLOB_API_KEY")
     API_SECRET         : str = _get("CLOB_SECRET")
@@ -49,11 +33,9 @@ class Config:
     TELEGRAM_BOT_TOKEN : str = _get("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID   : str = _get("TELEGRAM_CHAT_ID", "")
 
-    # --- ENDPOINTS ---
     CLOB_HOST  : str = _get("CLOB_HOST", "https://clob.polymarket.com")
     GAMMA_HOST : str = _get("GAMMA_HOST", "https://gamma-api.polymarket.com")
 
-    # --- RISK MANAGEMENT (KELLY) ---
     KELLY_MULTIPLIER       : float = _get_float("KELLY_MULTIPLIER", 0.5)
     MAX_KELLY_FRACTION     : float = _get_float("MAX_KELLY_FRACTION", 0.30)
     MIN_BET_USDC           : float = _get_float("MIN_BET_USDC", 5.0)
@@ -65,12 +47,10 @@ class Config:
     TIGHT_TRAILING_STOP_PCT : float = _get_float("TIGHT_TRAILING_STOP_PCT", 0.07)
     PROFIT_THRESHOLD        : float = _get_float("PROFIT_THRESHOLD", 0.85)
 
-    # --- CIRCUIT BREAKER ---
     MAX_DRAWDOWN_PCT       : float = _get_float("MAX_DRAWDOWN_PCT", 0.30)
     MAX_DAILY_LOSS_PCT     : float = _get_float("MAX_DAILY_LOSS_PCT", 0.10)
     MAX_CONSECUTIVE_LOSSES : int   = _get_int("MAX_CONSECUTIVE_LOSSES", 3)
 
-    # --- HOURLY STRATEGY ---
     HOURLY_MAX_MINUTES_TO_RESOLVE : int   = _get_int("HOURLY_MAX_MINUTES_TO_RESOLVE", 90)
     HOURLY_MIN_MINUTES_TO_RESOLVE : int   = _get_int("HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
     HOURLY_MISPRICING_THRESHOLD   : float = _get_float("HOURLY_MISPRICING_THRESHOLD", 0.12)
@@ -80,12 +60,10 @@ class Config:
     HOURLY_VOL_HOURS              : int   = _get_int("HOURLY_VOL_HOURS", 24)
     HOURLY_DRIFT_HOURS            : int   = _get_int("HOURLY_DRIFT_HOURS", 4)
 
-    # --- CAPITAL & SYSTEM ---
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
     POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
     DRY_RUN          : bool    = _get_bool("DRY_RUN", True)
-
 
 config = Config()
 

@@ -1,13 +1,3 @@
-"""
-src/logic/exit_strategy.py
-==========================
-Exit strategy — kapan keluar dari posisi.
-
-Dua mekanisme utama:
-1. Trailing Stop  — protect dari reversal, exit kalau harga turun > 15% dari peak
-2. Resolve Awareness — hold vs lock profit tergantung proximity ke resolve date
-"""
-
 from decimal import Decimal
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,30 +6,23 @@ from typing import Optional
 
 from src.logic.pricing import ke_decimal, validasi_harga
 
-
-# ─────────────────────────────────────────────
-# TYPES
-# ─────────────────────────────────────────────
-
 class ExitSignal(Enum):
-    HOLD             = "hold"              # Tahan posisi
-    EXIT_TRAILING    = "exit_trailing"     # Trailing stop triggered
-    EXIT_LOCK_PROFIT = "exit_lock_profit"  # Lock profit, redeploy modal
-    HOLD_TO_RESOLVE  = "hold_to_resolve"   # Hampir resolve, tahan sampai $1
-    EXIT_STALE       = "exit_stale"        # Posisi terlalu lama, tidak bergerak
-
+    HOLD             = "hold"
+    EXIT_TRAILING    = "exit_trailing"
+    EXIT_LOCK_PROFIT = "exit_lock_profit"
+    HOLD_TO_RESOLVE  = "hold_to_resolve"
+    EXIT_STALE       = "exit_stale"
 
 @dataclass
 class Position:
-    """Representasi satu posisi aktif."""
     condition_id: str
-    outcome: str                      # "Yes" atau "No"
-    entry_price: Decimal              # harga saat beli
-    current_price: Decimal            # harga terkini
-    highest_price: Decimal            # harga tertinggi sejak entry
-    shares: Decimal                   # jumlah shares
-    capital_at_risk: Decimal          # USDC yang diinvestasikan
-    resolve_date: datetime            # kapan market resolve
+    outcome: str
+    entry_price: Decimal
+    current_price: Decimal
+    highest_price: Decimal
+    shares: Decimal
+    capital_at_risk: Decimal
+    resolve_date: datetime
     entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     question: str = ""
     token_id: str = ""
@@ -57,7 +40,6 @@ class Position:
 
     @property
     def unrealized_pnl_pct(self) -> Decimal:
-        """PnL unrealized dalam persen dari entry."""
         if self.entry_price == Decimal("0"):
             return Decimal("0")
         return ((self.current_price - self.entry_price) / self.entry_price * 100
@@ -65,25 +47,21 @@ class Position:
 
     @property
     def drawdown_from_peak(self) -> Decimal:
-        """Drawdown dari harga tertinggi (0-1)."""
         if self.highest_price == Decimal("0"):
             return Decimal("0")
         return ((self.highest_price - self.current_price) / self.highest_price
                 ).quantize(Decimal("0.0001"))
 
-
 @dataclass
 class ExitDecision:
-    """Output dari evaluasi exit strategy."""
     signal: ExitSignal
     should_exit: bool
     position: Position
 
-    # Detail
     reason: str
-    trailing_stop_price: Optional[Decimal] = None   # harga trigger trailing stop
-    suggested_exit_price: Optional[Decimal] = None  # rekomendasi exit price
-    estimated_pnl_usdc: Optional[Decimal] = None    # estimasi PnL kalau exit
+    trailing_stop_price: Optional[Decimal] = None
+    suggested_exit_price: Optional[Decimal] = None
+    estimated_pnl_usdc: Optional[Decimal] = None
 
     def __str__(self) -> str:
         emoji = "🔴" if self.should_exit else "🟢"
@@ -93,31 +71,16 @@ class ExitDecision:
             f"{self.reason}"
         )
 
-
-# ─────────────────────────────────────────────
-# CORE EXIT EVALUATOR
-# ─────────────────────────────────────────────
-
 class ExitEvaluator:
-    """
-    Evaluasi kapan harus keluar dari posisi.
-
-    Rules (urutan prioritas):
-    1. Trailing stop — kalau turun > trailing_pct dari peak → EXIT
-    2. Resolve awareness — kalau harga > profit_threshold DAN hampir resolve → HOLD_TO_RESOLVE
-    3. Lock profit — kalau harga > profit_threshold DAN masih jauh dari resolve → EXIT_LOCK_PROFIT
-    4. Stale check — kalau posisi terlalu lama tidak bergerak → EXIT_STALE
-    5. Default → HOLD
-    """
 
     def __init__(
         self,
-        trailing_stop_pct: float = 0.15,       # exit kalau turun 15% dari peak
-        profit_threshold: float = 0.85,         # harga "sudah profit besar"
-        tight_trailing_stop_pct: float = 0.07,  # trailing stop diperketat saat profit zone
-        days_hold_to_resolve: int = 3,          # kalau ≤ N hari → hold to resolve
-        max_days_stale: int = 21,               # max hari hold tanpa movement
-        stale_movement_threshold: float = 0.05, # movement < 5% dianggap stale
+        trailing_stop_pct: float = 0.15,
+        profit_threshold: float = 0.85,
+        tight_trailing_stop_pct: float = 0.07,
+        days_hold_to_resolve: int = 3,
+        max_days_stale: int = 21,
+        stale_movement_threshold: float = 0.05,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -127,14 +90,8 @@ class ExitEvaluator:
         self.stale_movement_threshold = ke_decimal(stale_movement_threshold)
 
     def evaluate(self, pos: Position) -> ExitDecision:
-        """
-        Evaluasi posisi dan return ExitDecision.
-        Rules dievaluasi secara berurutan — pertama yang trigger menang.
-        """
-        # ── Rule 1 & 2: Profit Zone — tight trailing stop ─────────────────
         if pos.current_price >= self.profit_threshold:
 
-            # ≤ 3 hari ke resolve → tahan, tunggu settle ke $1
             if pos.days_to_resolve <= self.days_hold_to_resolve:
                 return ExitDecision(
                     signal=ExitSignal.HOLD_TO_RESOLVE,
@@ -148,7 +105,6 @@ class ExitEvaluator:
                     ),
                 )
 
-            # > 3 hari → tight trailing stop aktif, biarkan profit jalan
             tight_stop = (pos.highest_price * (Decimal("1") - self.tight_trailing_stop_pct)
                           ).quantize(Decimal("0.0001"))
 
@@ -170,7 +126,6 @@ class ExitEvaluator:
                     ),
                 )
 
-            # Profit zone, tight stop belum kena → let it run
             return ExitDecision(
                 signal=ExitSignal.HOLD,
                 should_exit=False,
@@ -185,7 +140,6 @@ class ExitEvaluator:
                 ),
             )
 
-        # ── Rule 3: Normal Trailing Stop (di luar profit zone) ────────────
         trailing_stop_price = (pos.highest_price * (Decimal("1") - self.trailing_stop_pct)
                                ).quantize(Decimal("0.0001"))
 
@@ -207,7 +161,6 @@ class ExitEvaluator:
                 ),
             )
 
-        # ── Rule 4: Stale Position ─────────────────────────────────────────
         movement = abs(pos.current_price - pos.entry_price) / pos.entry_price if pos.entry_price else Decimal("0")
         if (pos.days_held >= self.max_days_stale
                 and movement < self.stale_movement_threshold):
@@ -224,7 +177,6 @@ class ExitEvaluator:
                 ),
             )
 
-        # ── Default: HOLD ──────────────────────────────────────────────────
         return ExitDecision(
             signal=ExitSignal.HOLD,
             should_exit=False,
@@ -239,10 +191,6 @@ class ExitEvaluator:
         )
 
     def update_highest_price(self, pos: Position) -> Position:
-        """
-        Update highest_price kalau current_price lebih tinggi.
-        Panggil ini setiap kali ada price update.
-        """
         if pos.current_price > pos.highest_price:
             pos.highest_price = pos.current_price
         return pos
@@ -252,38 +200,25 @@ class ExitEvaluator:
         pos: Position,
         exit_price: Optional[Decimal] = None,
     ) -> Decimal:
-        """Estimasi PnL kalau exit sekarang (dalam USDC)."""
         price = exit_price or pos.current_price
         return ((price - pos.entry_price) * pos.shares).quantize(Decimal("0.01"))
 
-
-# ─────────────────────────────────────────────
-# PORTFOLIO-LEVEL EVALUATOR
-# ─────────────────────────────────────────────
-
 class PortfolioExitManager:
-    """
-    Evaluasi semua posisi aktif sekaligus.
-    Wrap ExitEvaluator untuk multi-position management.
-    """
 
     def __init__(self, evaluator: Optional[ExitEvaluator] = None):
         self.evaluator = evaluator or ExitEvaluator()
 
     def evaluate_all(self, positions: list[Position]) -> list[ExitDecision]:
-        """Evaluasi semua posisi, return sorted: exit dulu baru hold."""
         decisions = []
         for pos in positions:
             pos = self.evaluator.update_highest_price(pos)
             decision = self.evaluator.evaluate(pos)
             decisions.append(decision)
 
-        # Sort: yang perlu exit duluan
         decisions.sort(key=lambda d: (not d.should_exit, d.signal.value))
         return decisions
 
     def get_exits(self, positions: list[Position]) -> list[ExitDecision]:
-        """Return hanya posisi yang harus di-exit."""
         return [d for d in self.evaluate_all(positions) if d.should_exit]
 
     def summary(self, decisions: list[ExitDecision]) -> str:
@@ -297,11 +232,6 @@ class PortfolioExitManager:
             f"EXIT {exits} | HOLD {holds} | "
             f"Est. PnL exits: ${total_pnl:+.2f}"
         )
-
-
-# ─────────────────────────────────────────────
-# QUICK TEST — python src/logic/exit_strategy.py
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     from datetime import timedelta

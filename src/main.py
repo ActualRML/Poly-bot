@@ -1,10 +1,3 @@
-"""
-src/main.py
-===========
-Entry point — orchestrator utama bot (async version).
-Strategi: Crypto Hourly Trading only.
-"""
-
 import asyncio
 import signal
 import sys
@@ -42,11 +35,9 @@ _price_cache: dict = {}
 _cache_time: dict  = {}
 _CACHE_TTL         = 300
 _price_lock        = asyncio.Lock()
-_open_position_lock = asyncio.Lock()  # serialize can_open→open_position untuk hindari race di asyncio.gather
-
+_open_position_lock = asyncio.Lock()
 
 async def _fetch_crypto_price(symbol: str, session: aiohttp.ClientSession) -> float | None:
-    """Fetch harga crypto. Binance primary (30s cache), CoinGecko fallback (5m cache)."""
     from src.api.binance_client import fetch_price as _binance_price
     symbol = symbol.upper()
 
@@ -94,9 +85,7 @@ async def _fetch_crypto_price(symbol: str, session: aiohttp.ClientSession) -> fl
 
         return None
 
-
 async def _prefetch_prices(session: aiohttp.ClientSession) -> None:
-    """Fetch semua harga crypto sekaligus secara paralel."""
     await asyncio.gather(
         _fetch_crypto_price("BTC", session),
         _fetch_crypto_price("ETH", session),
@@ -105,9 +94,7 @@ async def _prefetch_prices(session: aiohttp.ClientSession) -> None:
         return_exceptions=True,
     )
 
-
 async def _build_vol_data(session: aiohttp.ClientSession) -> dict:
-    """Fetch realized vol semua asset aktif. Return {asset: annualized_vol, "DEFAULT": 0.40}."""
     from src.api.binance_client import fetch_realized_vol
     vol_hours = getattr(config, "HOURLY_VOL_HOURS", 4)
 
@@ -124,7 +111,6 @@ async def _build_vol_data(session: aiohttp.ClientSession) -> dict:
             vol_data[symbol] = result
     return vol_data
 
-
 async def _force_exit_check(
     clob,
     manager,
@@ -132,7 +118,6 @@ async def _force_exit_check(
     current_prices: dict,
     session: aiohttp.ClientSession,
 ) -> None:
-    """Jual posisi yang < 10 menit sebelum expiry. Jalan sebelum evaluate_exits()."""
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -196,12 +181,10 @@ async def _force_exit_check(
                 session     = session,
             )
 
-
 async def _get_base_rates(
     market: dict, builder, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
 ) -> list:
-    """Auto-generate base rates untuk crypto market (async)."""
     question     = (market.get("question") or "").lower()
     calc         = CryptoProbabilityCalculator()
     end_date_str = market.get("endDate") or market.get("end_date_iso", "")
@@ -232,8 +215,6 @@ async def _get_base_rates(
         direction = "below" if any(k in question for k in ["dip", "drop", "fall", "below", "↓"]) else "above"
         use_barrier = " on " not in question
 
-        # Pakai vol dari vol_data cycle (sudah di-fetch di _build_vol_data) —
-        # hindari fetch ulang per-market yang menyebabkan Binance rate limit (418).
         if vol_data and symbol in vol_data:
             volatility = vol_data[symbol]
         else:
@@ -249,7 +230,6 @@ async def _get_base_rates(
             return []
         return [builder.from_manual(rate=result.probability, confidence=result.confidence, notes=result.notes)]
 
-    # XRP & DOGE excluded — MAE >4%, edge effective negatif
     for symbol, keywords in [
         ("BTC",  ["bitcoin", "btc"]),
         ("ETH",  ["ethereum", " eth ", "ether "]),
@@ -262,12 +242,10 @@ async def _get_base_rates(
 
     return []
 
-
 async def _analyze_market(
     market, clob, gamma, detector, sizer, manager,
     builder, breaker, capital, session, vol_data: dict | None = None
 ):
-    """Analisis satu market secara async."""
     from src.logic.pricing import ke_decimal
 
     condition_id = market.get("conditionId", market.get("id", ""))
@@ -282,7 +260,6 @@ async def _analyze_market(
     if not yes_base_rates:
         return
 
-    # Per-asset dynamic threshold berdasarkan realized vol
     question_lower = question.lower()
     asset = "DEFAULT"
     for sym, kws in [
@@ -342,7 +319,6 @@ async def _analyze_market(
             logger.debug(f"Skip {question[:40]} | EV={float(kelly.expected_value):.3f}")
             continue
 
-        # Adaptive position size cap — streak-based, cap terhadap Kelly
         max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
         if float(kelly.bet_usdc) > max_size:
             from dataclasses import replace as _dc_replace
@@ -356,8 +332,6 @@ async def _analyze_market(
             logger.debug(f"Skip {question[:40]} | profit terlalu kecil: ${profit_if_win:.2f} < ${min_profit:.2f}")
             continue
 
-        # Serialize gating + open. Tanpa lock, asyncio.gather bisa loloskan
-        # multiple market saat capacity tersisa hanya untuk 1 — exceed MAX_OPEN_POSITIONS.
         async with _open_position_lock:
             can_open, reason = manager.can_open(
                 condition_id  = condition_id,
@@ -418,7 +392,7 @@ async def _analyze_market(
                         resolve_date    = resolve_date,
                         gap_pct         = result.gap_pct / 100,
                         kelly_fraction  = float(kelly.bet_fraction),
-                        strategy_mode   = "hourly",
+                        strategy_mode   = "daily",
                         token_id        = token_id,
                     )
                     log_prediction({
@@ -431,7 +405,6 @@ async def _analyze_market(
                         "resolve_date":   resolve_date.isoformat(),
                     })
 
-        # Telegram alert di luar lock — tidak perlu blocking entry decision lain
         alert = get_alert()
         if alert:
             await alert.alert_signal(
@@ -445,9 +418,7 @@ async def _analyze_market(
                 dry_run  = config.DRY_RUN,
             )
 
-
 async def _dry_run_open(result, kelly, market, manager, buy_outcome: str, buy_price: float, token_id: str = ""):
-    """Simulate buka posisi di DRY RUN mode."""
     from src.logic.pricing import ke_decimal
 
     condition_id     = market.get("conditionId", market.get("id", ""))
@@ -468,7 +439,7 @@ async def _dry_run_open(result, kelly, market, manager, buy_outcome: str, buy_pr
         resolve_date    = resolve_date,
         gap_pct         = result.gap_pct / 100,
         kelly_fraction  = float(kelly.bet_fraction),
-        strategy_mode   = "hourly_dry_run",
+        strategy_mode   = "daily_dry_run",
         token_id        = token_id,
     )
     log_prediction({
@@ -481,12 +452,9 @@ async def _dry_run_open(result, kelly, market, manager, buy_outcome: str, buy_pr
         "resolve_date":   resolve_date.isoformat(),
     })
 
-
 FORCE_CLOSE_GRACE_HOURS = 24
 
-
 async def _backfill_token_id(gamma, session, condition_id: str, outcome: str) -> str:
-    """Fetch market dari Gamma → ekstrak token_id buat outcome ini. Return '' kalau gagal."""
     try:
         market = await gamma.aget_market(condition_id, session)
         if not market:
@@ -498,12 +466,7 @@ async def _backfill_token_id(gamma, session, condition_id: str, outcome: str) ->
         logger.debug(f"Gagal backfill token_id {condition_id[:8]}: {e}")
         return ""
 
-
 async def _backfill_missing_token_ids(gamma, session) -> None:
-    """
-    Cari semua posisi open yang token_id-nya kosong → fetch dari Gamma → simpan.
-    Jalan tiap cycle, no-op kalau semua posisi udah ada token_id.
-    """
     from src.models.database import get_open_positions, update_position_token_id
 
     missing = [p for p in get_open_positions() if not (p.get("token_id") or "")]
@@ -520,17 +483,11 @@ async def _backfill_missing_token_ids(gamma, session) -> None:
         else:
             logger.debug(f"[BACKFILL] gagal {cid[:8]} {outcome} — market mungkin sudah closed di Gamma")
 
-
 async def _get_resolved_price_from_gamma(gamma, session, condition_id: str, outcome: str) -> Optional[float]:
-    """
-    Untuk market yang sudah resolved di Polymarket, CLOB return 404 (no order book).
-    Tapi Gamma masih simpan `outcomePrices` final (e.g. ["1", "0"] kalau YES menang).
-    Return harga resolved (0.0 atau 1.0) atau None kalau gagal.
-    """
     import json
     try:
         market = await gamma.aget_market(condition_id, session)
-        if not market or not market.get("closed"):
+        if not market:
             return None
         outcomes       = market.get("outcomes", [])
         outcome_prices = market.get("outcomePrices", [])
@@ -538,27 +495,21 @@ async def _get_resolved_price_from_gamma(gamma, session, condition_id: str, outc
             outcomes = json.loads(outcomes)
         if isinstance(outcome_prices, str):
             outcome_prices = json.loads(outcome_prices)
+        if not outcome_prices:
+            return None
+        prices_float = [float(p) for p in outcome_prices]
+        if not all(p in (0.0, 1.0) for p in prices_float):
+            return None
         if outcome not in outcomes:
             return None
         idx = outcomes.index(outcome)
-        if 0 <= idx < len(outcome_prices):
-            return float(outcome_prices[idx])
+        if 0 <= idx < len(prices_float):
+            return prices_float[idx]
     except Exception as e:
         logger.debug(f"Gagal fetch resolved price {condition_id[:8]} {outcome}: {e}")
     return None
 
-
 async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.ClientSession) -> None:
-    """
-    Startup reconciliation — jalankan SEKALI sebelum main loop.
-
-    Berbeda dari _resolve_checker yang hanya cek resolve_date < now,
-    fungsi ini cek SEMUA posisi open ke Gamma API untuk menangkap:
-    - Market yang resolved lebih awal dari resolve_date
-    - Posisi yang stuck 'open' karena bot crash saat settle
-
-    Tidak memodifikasi posisi yang marketnya belum closed di Gamma.
-    """
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -575,10 +526,8 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
         tid     = pos.get("token_id") or ""
 
         try:
-            # Cek Gamma: apakah market sudah closed & ada outcomePrices?
             price = await _get_resolved_price_from_gamma(gamma, session, cid, outcome)
 
-            # Fallback: cek CLOB order book — tutup kalau near-resolved (≥0.98 atau ≤0.02)
             if price is None and tid:
                 try:
                     snapshot = clob.ambil_snapshot(token_id=tid)
@@ -617,15 +566,7 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
     else:
         log.info(f"[RECONCILE] Selesai — semua {len(positions)} posisi masih aktif")
 
-
 async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.ClientSession) -> None:
-    """
-    Cek posisi open yang resolve_date-nya sudah lewat.
-    - Resolved di Polymarket → ambil final outcomePrices dari Gamma
-    - Belum resolved tapi expired → fetch best_bid dari CLOB
-    - Auto-close kalau price ≥0.98 atau ≤0.02
-    - Force-close kalau >{FORCE_CLOSE_GRACE_HOURS}h lewat resolve & harga mid-range
-    """
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -666,11 +607,19 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
         hours_past = (now - resolve).total_seconds() / 3600
 
         if price is None:
-            log.warning(
-                f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} — "
-                f"tidak bisa fetch harga ({hours_past:.1f}h lewat resolve), skip"
-            )
-            continue
+            if hours_past > 2:
+                entry_price = float(ke_decimal(pos["entry_price"]))
+                price = entry_price
+                log.warning(
+                    f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} — "
+                    f"tidak bisa fetch harga setelah {hours_past:.1f}h, force close @ entry"
+                )
+            else:
+                log.warning(
+                    f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} — "
+                    f"tidak bisa fetch harga ({hours_past:.1f}h lewat resolve), skip"
+                )
+                continue
 
         if price >= 0.98 or price <= 0.02:
             reason = "resolve_expired"
@@ -712,9 +661,7 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
                 session     = session,
             )
 
-
 async def _fetch_current_prices(clob, manager) -> dict:
-    """Ambil harga terkini dari CLOB untuk semua posisi open."""
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -737,9 +684,244 @@ async def _fetch_current_prices(clob, manager) -> dict:
             logger.debug(f"Gagal fetch price {tid[:8]}: {e}")
     return prices
 
+_UPDOWN_SERIES = {
+    "BTC": "41",
+    "ETH": "40",
+    "SOL": "10086",
+    "XRP": "10100",
+}
+
+async def _scan_updown_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
+    import json as _json
+    results = []
+    for symbol, series_id in _UPDOWN_SERIES.items():
+        try:
+            batch = await gamma._aget(
+                "/events",
+                session,
+                params={
+                    "series_id": series_id,
+                    "closed":    "false",
+                    "limit":     1,
+                    "order":     "startDate",
+                    "ascending": "false",
+                },
+            )
+        except Exception as e:
+            logger.debug(f"[UPDOWN] Gagal fetch events {symbol}: {e}")
+            continue
+
+        if not isinstance(batch, list) or not batch:
+            continue
+
+        e    = batch[0]
+        mkts = e.get("markets", [])
+        if not mkts:
+            continue
+        mkt = mkts[0]
+
+        outcomes = mkt.get("outcomes", [])
+        if isinstance(outcomes, str):
+            try: outcomes = _json.loads(outcomes)
+            except: outcomes = []
+        op = mkt.get("outcomePrices", [])
+        if isinstance(op, str):
+            try: op = _json.loads(op)
+            except: op = []
+
+        outcomes_lower = [str(o).lower() for o in outcomes]
+        if "up" not in outcomes_lower or not op:
+            continue
+
+        mkt["_symbol"] = symbol
+        mkt["endDate"] = e.get("endDate", mkt.get("endDate", ""))
+        results.append(mkt)
+
+    return results
+
+async def _analyze_updown_market(
+    market: dict, clob, gamma, sizer, manager,
+    breaker, capital: float, session: aiohttp.ClientSession,
+    vol_data: dict | None = None,
+):
+    import json as _json
+    from src.logic.updown_strategy import calculate_updown_probability
+    from src.logic.pricing import ke_decimal
+
+    symbol = market.get("_symbol", "")
+    if not symbol:
+        return
+
+    condition_id = market.get("conditionId", market.get("id", ""))
+    question     = market.get("question", market.get("title", f"{symbol} Up or Down Daily"))
+
+    outcomes = market.get("outcomes", [])
+    op       = market.get("outcomePrices", [])
+    if isinstance(outcomes, str):
+        try: outcomes = _json.loads(outcomes)
+        except: outcomes = []
+    if isinstance(op, str):
+        try: op = _json.loads(op)
+        except: op = []
+
+    outcomes_lower = [str(o).lower() for o in outcomes]
+    if "up" not in outcomes_lower or not op:
+        return
+    try:
+        up_idx          = outcomes_lower.index("up")
+        market_price_up = float(op[up_idx])
+    except (ValueError, IndexError):
+        return
+
+    if market_price_up <= 0 or market_price_up >= 1:
+        return
+
+    end_date_str = market.get("endDate", "")
+    try:
+        end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+    except Exception:
+        return
+
+    if (end_date - datetime.now(timezone.utc)).total_seconds() <= 0:
+        return
+
+    delta_sec = (end_date - datetime.now(timezone.utc)).total_seconds()
+    prob_up = await calculate_updown_probability(symbol, session, vol_data or {}, end_date)
+    if prob_up is None:
+        return
+
+    edge      = prob_up - market_price_up
+    threshold = getattr(config, "UPDOWN_THRESHOLD", 0.05)
+
+    if abs(edge) < threshold:
+        logger.debug(f"[UPDOWN] {symbol} edge={edge:+.3f} < {threshold:.2f} — skip")
+        return
+
+    if edge > 0:
+        buy_outcome = "Up"
+        buy_price   = market_price_up
+        buy_winrate = prob_up
+    else:
+        buy_outcome = "Down"
+        buy_price   = round(1.0 - market_price_up, 4)
+        buy_winrate = round(1.0 - prob_up, 4)
+
+    if buy_price <= 0 or buy_price >= 1:
+        return
+
+    min_wr = getattr(config, "HOURLY_MIN_WINRATE_STRICT", 0.75)
+    if buy_winrate < min_wr:
+        logger.debug(f"[UPDOWN] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
+        return
+
+    kelly = sizer.calculate(
+        winrate      = buy_winrate,
+        market_price = buy_price,
+        capital      = capital,
+    )
+
+    if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
+        return
+
+    max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
+    if float(kelly.bet_usdc) > max_size:
+        from dataclasses import replace as _dc_replace
+        capped_usdc   = Decimal(str(max_size))
+        capped_shares = (capped_usdc / Decimal(str(buy_price))).quantize(Decimal("0.0001"))
+        kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
+
+    t_hours = delta_sec / 3600.0
+    log.info(
+        f"[bold cyan][UPDOWN][/bold cyan] {symbol} {t_hours:.1f}h left | "
+        f"BUY {buy_outcome} @ {buy_price:.3f} | "
+        f"P(Up)={prob_up:.3f} Mkt={market_price_up:.3f} Edge={edge:+.3f} | "
+        f"Kelly ${float(kelly.bet_usdc):.2f}"
+    )
+
+    tokens   = gamma.extract_token_ids(market)
+    token    = next((t for t in tokens if t["outcome"] == buy_outcome), None)
+    token_id = str(token["token_id"]) if token and token.get("token_id") else ""
+
+    async with _open_position_lock:
+        can_open, reason = manager.can_open(
+            condition_id  = condition_id,
+            outcome       = buy_outcome,
+            bet_usdc      = kelly.bet_usdc,
+            total_capital = ke_decimal(capital),
+        )
+        if not can_open:
+            logger.debug(f"[UPDOWN] Skip {condition_id[:8]} {buy_outcome}: {reason}")
+            return
+
+        if not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+            return
+
+        try:
+            resolve_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        except Exception:
+            resolve_date = datetime.now(timezone.utc)
+
+        if config.DRY_RUN:
+            log.warning("[yellow][UPDOWN] DRY RUN — simulasi posisi dibuka[/yellow]")
+            manager.open_position(
+                condition_id    = condition_id,
+                question        = question,
+                outcome         = buy_outcome,
+                entry_price     = ke_decimal(buy_price),
+                shares          = kelly.shares,
+                capital_at_risk = kelly.bet_usdc,
+                resolve_date    = resolve_date,
+                gap_pct         = abs(edge),
+                kelly_fraction  = float(kelly.bet_fraction),
+                strategy_mode   = "updown_dry_run",
+                token_id        = token_id,
+            )
+            log_prediction({
+                "condition_id":   condition_id,
+                "question":       question,
+                "outcome":        buy_outcome,
+                "predicted_prob": str(round(buy_winrate, 4)),
+                "market_price":   str(buy_price),
+                "gap_pct":        str(round(abs(edge) * 100, 2)),
+                "resolve_date":   resolve_date.isoformat(),
+            })
+        else:
+            if not token_id:
+                logger.warning(f"[UPDOWN] token_id tidak ditemukan untuk {buy_outcome}")
+                return
+
+            order = clob.pasang_order(
+                sisi     = SisiOrder.BELI,
+                harga    = ke_decimal(buy_price),
+                ukuran   = kelly.shares,
+                token_id = token_id,
+            )
+
+            if order:
+                manager.open_position(
+                    condition_id    = condition_id,
+                    question        = question,
+                    outcome         = buy_outcome,
+                    entry_price     = ke_decimal(buy_price),
+                    shares          = kelly.shares,
+                    capital_at_risk = kelly.bet_usdc,
+                    resolve_date    = resolve_date,
+                    gap_pct         = abs(edge),
+                    kelly_fraction  = float(kelly.bet_fraction),
+                    strategy_mode   = "updown",
+                    token_id        = token_id,
+                )
+                log_prediction({
+                    "condition_id":   condition_id,
+                    "question":       question,
+                    "outcome":        buy_outcome,
+                    "predicted_prob": str(round(buy_winrate, 4)),
+                    "market_price":   str(buy_price),
+                    "gap_pct":        str(round(abs(edge) * 100, 2)),
+                    "resolve_date":   resolve_date.isoformat(),
+                })
 
 async def run_mispricing_mode(clob: ClobClient):
-    """Loop utama hourly crypto strategy — fully async."""
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     detector = MispricingDetector(threshold=getattr(config, "HOURLY_MISPRICING_THRESHOLD", 0.12))
     sizer   = KellySizer(
@@ -771,7 +953,7 @@ async def run_mispricing_mode(clob: ClobClient):
     )
 
     log.info(
-        f"[bold green]Hourly crypto strategy aktif (async).[/bold green] "
+        f"[bold green]Daily crypto + Up/Down Daily strategy aktif (async).[/bold green] "
         f"Threshold: dynamic [6-25%] | "
         f"Min winrate: {getattr(config, 'HOURLY_MIN_WINRATE_STRICT', 0.75):.0%} | "
         f"Polling: {config.POLLING_INTERVAL}s"
@@ -796,7 +978,6 @@ async def run_mispricing_mode(clob: ClobClient):
                 prefix  = "[DRY RUN] " if config.DRY_RUN else ""
                 log.info(f"{prefix}Balance: ${capital:.2f} USDC | {manager.get_summary()}")
 
-                # Exit block — SELALU jalan, tidak diblokir circuit breaker
                 vol_data = await _build_vol_data(session)
                 btc_vol  = vol_data.get("BTC") or vol_data.get("DEFAULT", 0.40)
                 log.info(
@@ -808,7 +989,6 @@ async def run_mispricing_mode(clob: ClobClient):
 
                 current_prices = await _fetch_current_prices(clob, manager)
 
-                # Dynamic trailing stop — adapt ke harga posisi terkini
                 open_prices = [
                     float(p)
                     for outcome_map in current_prices.values()
@@ -855,7 +1035,6 @@ async def run_mispricing_mode(clob: ClobClient):
                 if exits:
                     log.info(f"[yellow]{len(exits)} posisi di-exit cycle ini[/yellow]")
 
-                # Circuit breaker check — HANYA blokir entry baru
                 cb_status = breaker.check(unrealized_pnl=manager.get_unrealized_pnl())
                 if not cb_status.can_trade:
                     log.warning(f"[CIRCUIT BREAKER] {cb_status}")
@@ -880,7 +1059,7 @@ async def run_mispricing_mode(clob: ClobClient):
                     min_minutes_to_resolve = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5),
                     limit                  = 500,
                 )
-                log.info(f"Hourly scan: {len(markets)} market lolos filter")
+                log.info(f"Daily scan: {len(markets)} market lolos filter")
 
                 daily_drawdown = breaker.state.daily_loss / breaker.starting_capital
                 safety         = breaker.check_safety_thresholds(btc_vol, daily_drawdown)
@@ -907,6 +1086,18 @@ async def run_mispricing_mode(clob: ClobClient):
                         if isinstance(r, Exception):
                             logger.warning(f"[ANALYZE] Error di market analysis: {str(r).replace('[', '\\[')}")
 
+                    updown_markets = await _scan_updown_markets(session, gamma)
+                    if updown_markets:
+                        log.info(f"[UPDOWN] {len(updown_markets)} active Up/Down Daily markets")
+                    for ud_mkt in updown_markets:
+                        try:
+                            await _analyze_updown_market(
+                                ud_mkt, clob, gamma, sizer, manager,
+                                breaker, capital, session, vol_data=vol_data,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[UPDOWN] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -916,7 +1107,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     await alert.alert_error(str(e), session)
 
             await asyncio.sleep(config.POLLING_INTERVAL)
-
 
 def main():
     tampilkan_header()
@@ -953,16 +1143,14 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         pass
 
-
 def _extract_price_target(question: str) -> float | None:
-    """Extract angka target harga dari teks pertanyaan."""
     patterns = [
-        r'\$([0-9]{1,3}(?:,[0-9]{3})+)',       # $77,000
-        r'\$([0-9]+(?:\.[0-9]+)?)[kK]',         # $77k
-        r'\$([0-9]{4,})',                        # $77000
-        r'[↑↓]\s*([0-9]{1,3}(?:,[0-9]{3})+)',  # ↓ 77,000
-        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)[kK]',   # ↑ 77k
-        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)',        # ↓ 1.40 (XRP)
+        r'\$([0-9]{1,3}(?:,[0-9]{3})+)',
+        r'\$([0-9]+(?:\.[0-9]+)?)[kK]',
+        r'\$([0-9]{4,})',
+        r'[↑↓]\s*([0-9]{1,3}(?:,[0-9]{3})+)',
+        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)[kK]',
+        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)',
     ]
     for pattern in patterns:
         match = re.search(pattern, question)
@@ -976,7 +1164,6 @@ def _extract_price_target(question: str) -> float | None:
             except ValueError:
                 continue
     return None
-
 
 if __name__ == "__main__":
     main()

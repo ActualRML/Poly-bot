@@ -1,10 +1,3 @@
-"""
-src/logic/probability.py
-========================
-Kalkulasi probabilitas harga crypto mencapai target
-menggunakan distribusi log-normal + barrier crossing.
-"""
-
 import math
 import logging
 import asyncio
@@ -25,10 +18,6 @@ VOLATILITAS_FALLBACK = {
     "DEFAULT": 0.65,
 }
 
-# Koreksi kalibrasi per model per asset — derived dari backtest 90d/358d.
-# Key level-1: "at_expiry" atau "barrier"
-# Key level-2: asset, Key level-3: target_pct → correction
-# Hanya berlaku untuk direction="above". Update setiap 30-60 hari.
 CALIBRATION_CORRECTION: dict[str, dict[str, dict[float, float]]] = {
     "at_expiry": {
         "BTC":  {0.08: 0.08, 0.1: 0.08},
@@ -48,16 +37,7 @@ CALIBRATION_CORRECTION: dict[str, dict[str, dict[float, float]]] = {
     },
 }
 
-
 def _get_calibration_correction(asset: str, target_pct: float, model: str = "at_expiry") -> float:
-    """
-    Interpolasi linear koreksi kalibrasi untuk target_pct sembarang.
-    Return 0.0 jika asset tidak ada di tabel atau target_pct di bawah titik pertama.
-
-    target_pct di-abs sebelum lookup — backtest dilakukan di sisi "above",
-    tapi koreksi diasumsikan simetris untuk above/below (jarak target dari spot
-    yang menentukan bias model, bukan arahnya).
-    """
     corrections = CALIBRATION_CORRECTION.get(model, {}).get(asset.upper(), {})
     target_pct = abs(target_pct)
     if not corrections or target_pct <= 0:
@@ -85,12 +65,10 @@ _iv_cache_time: dict = {}
 _IV_CACHE_TTL        = 300
 _iv_lock             = asyncio.Lock()
 
-
 async def fetch_deribit_iv(asset: str, session: aiohttp.ClientSession) -> Optional[float]:
     symbol = asset.upper()
     now    = datetime.now(timezone.utc).timestamp()
 
-    # Fast path — cache hit tanpa lock
     if symbol in _iv_cache:
         if now - _iv_cache_time.get(symbol, 0) < _IV_CACHE_TTL:
             return _iv_cache[symbol]
@@ -101,8 +79,6 @@ async def fetch_deribit_iv(asset: str, session: aiohttp.ClientSession) -> Option
         logger.debug(f"[IV] {symbol} tidak support Deribit DVOL")
         return None
 
-    # Lock seluruh fetch — concurrent caller kedua dst akan re-check cache
-    # setelah caller pertama populate, jadi cuma 1 HTTP request per TTL window.
     async with _iv_lock:
         if symbol in _iv_cache:
             if now - _iv_cache_time.get(symbol, 0) < _IV_CACHE_TTL:
@@ -149,7 +125,6 @@ async def fetch_deribit_iv(asset: str, session: aiohttp.ClientSession) -> Option
 
     return None
 
-
 async def get_volatility(asset: str, session: Optional[aiohttp.ClientSession] = None) -> tuple[float, str]:
     symbol = asset.upper()
 
@@ -161,7 +136,6 @@ async def get_volatility(asset: str, session: Optional[aiohttp.ClientSession] = 
     fallback = VOLATILITAS_FALLBACK.get(symbol, VOLATILITAS_FALLBACK["DEFAULT"])
     logger.debug(f"[IV] {symbol} pakai historical fallback = {fallback:.1%}")
     return fallback, "historical"
-
 
 @dataclass
 class ProbabilityResult:
@@ -176,7 +150,6 @@ class ProbabilityResult:
     confidence: float
     model: str
     notes: str
-
 
 class CryptoProbabilityCalculator:
 
@@ -231,9 +204,6 @@ class CryptoProbabilityCalculator:
                 prob  = self._expiry_prob(current_price, target_price, T, vol, mu_adj, direction)
                 model = "at_expiry"
 
-            # Apply calibration correction untuk above DAN below.
-            # Backtest hanya di sisi above, tapi correction diasumsikan simetris
-            # (jarak target dari spot yang menentukan bias, bukan arah).
             model_key  = "barrier" if use_barrier else "at_expiry"
             target_pct = (target_price - current_price) / current_price
             prob -= _get_calibration_correction(asset, target_pct, model_key)
@@ -266,14 +236,12 @@ class CryptoProbabilityCalculator:
         ln_SK  = math.log(S / K)
         d1 = (-ln_SK + mu_adj * T) / (vol * sqrt_T)
         d2 = ( ln_SK + mu_adj * T) / (vol * sqrt_T)
-        # Guard overflow: kalau exponent extreme, exp_term effectively 0 atau 1.
-        # Probabilitas tetap finite karena _norm_cdf bounded [0, 1].
         if vol > 0:
             exp_arg = 2.0 * mu_adj * math.log(K / S) / (vol ** 2)
             if exp_arg < -700:
                 exp_term = 0.0
             elif exp_arg > 700:
-                exp_term = math.exp(700)  # cap untuk hindari OverflowError
+                exp_term = math.exp(700)
             else:
                 exp_term = math.exp(exp_arg)
         else:
@@ -311,7 +279,6 @@ class CryptoProbabilityCalculator:
             volatility=vol, volatility_source=vol_source, probability=0.0,
             direction="unknown", confidence=0.0, model="none", notes=f"SKIP — {reason}",
         )
-
 
 if __name__ == "__main__":
     async def test():

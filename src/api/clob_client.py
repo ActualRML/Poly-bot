@@ -1,15 +1,3 @@
-"""
-src/api/clob_client.py
-======================
-Wrapper tipis di atas py-clob-client.
-
-Tanggung jawab:
-- Inisialisasi koneksi ke Polymarket CLOB API
-- Fetch order book (best bid/ask) → kembalikan Snapshot
-- Place order → kembalikan Order
-- Semua nilai harga SELALU dikonversi ke Decimal sebelum dikembalikan
-"""
-
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,24 +8,13 @@ from src.logic.pricing import ke_decimal
 from src.utils.config import config
 from src.utils.logger import log
 
-
 class ClobClient:
-    """
-    Wrapper py-clob-client untuk Polymarket CLOB API.
-
-    Semua harga yang masuk/keluar WAJIB dalam bentuk Decimal.
-    Float tidak pernah bocor ke luar class ini.
-    """
 
     def __init__(self):
         self._client = None
         self._terhubung = False
 
     def hubungkan(self) -> bool:
-        """
-        Buat koneksi ke Polymarket CLOB API.
-        Returns True jika berhasil, False jika gagal.
-        """
         try:
             from py_clob_client.client import ClobClient as _Clob
             from py_clob_client.clob_types import ApiCreds
@@ -68,10 +45,6 @@ class ClobClient:
             return False
 
     def get_balance(self) -> float:
-        """
-        Ambil balance USDC (collateral) user.
-        Return 0.0 kalau wallet kosong atau DRY_RUN — bot tetap jalan.
-        """
         if not self._terhubung or not self._client:
             return 0.0
         try:
@@ -79,31 +52,17 @@ class ClobClient:
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             resp = self._client.get_balance_allowance(params=params)
 
-            # Response bisa berbeda tergantung versi library
             if isinstance(resp, (int, float)):
                 return float(resp)
             if isinstance(resp, dict):
-                # Coba ambil field balance atau allowance
                 bal = resp.get("balance") or resp.get("allowance") or 0
                 return float(bal)
-            # Kalau response aneh (misal hex address), return 0
             return 0.0
         except Exception as e:
             log.warning(f"[yellow]Gagal ambil balance: {e} — lanjut dengan balance 0[/yellow]")
             return 0.0
 
     def ambil_snapshot(self, token_id: Optional[str] = None) -> Optional[Snapshot]:
-        """
-        Ambil snapshot order book terkini dari Polymarket.
-
-        Args:
-            token_id: ID token yang ingin diambil datanya.
-                      Jika None, gunakan TOKEN_ID dari config.
-
-        Returns:
-            Snapshot dengan best_bid dan best_ask dalam Decimal,
-            atau None jika gagal.
-        """
         if not token_id:
             log.error("ambil_snapshot: token_id wajib diisi")
             return None
@@ -146,18 +105,6 @@ class ClobClient:
         ukuran  : Decimal,
         token_id: Optional[str] = None,
     ) -> Optional[Order]:
-        """
-        Pasang limit order ke Polymarket CLOB.
-
-        Args:
-            sisi    : SisiOrder.BELI atau SisiOrder.JUAL
-            harga   : Harga limit (Decimal)
-            ukuran  : Ukuran order dalam USDC (Decimal)
-            token_id: ID token (default dari config)
-
-        Returns:
-            Order yang berhasil ditempatkan, atau None jika gagal.
-        """
         if config.DRY_RUN:
             log.info(
                 f"[dim][DRY RUN] Simulasi order {sisi.value} "
@@ -210,7 +157,6 @@ class ClobClient:
             return None
 
     def batalkan_semua_order(self) -> bool:
-        """Batalkan semua order aktif (dipakai saat shutdown)."""
         if config.DRY_RUN or not self._terhubung:
             return True
         try:

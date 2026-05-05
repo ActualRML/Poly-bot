@@ -1,12 +1,3 @@
-"""
-src/api/gamma_client.py
-Gamma API — market discovery & metadata (no auth required)
-Docs: https://gamma-api.polymarket.com
-
-Async version: pakai aiohttp untuk non-blocking HTTP calls.
-Tetap sediakan sync fallback untuk script standalone (monitor.py, dll).
-"""
-
 import asyncio
 import aiohttp
 import requests
@@ -16,28 +7,15 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-
 class GammaClient:
-    """
-    Read-only client untuk Gamma API Polymarket.
-
-    Dua mode:
-    - Async: pakai aiohttp session (dari main loop)
-    - Sync:  pakai requests (untuk script standalone)
-    """
 
     def __init__(self, host: str = "https://gamma-api.polymarket.com"):
         self.host = host.rstrip("/")
-        # Sync session — untuk backward compatibility
         self._sync_session = requests.Session()
         self._sync_session.headers.update({
             "Accept": "application/json",
             "User-Agent": "polymarket-bot/1.0"
         })
-
-    # ─────────────────────────────────────────────
-    # ASYNC HTTP
-    # ─────────────────────────────────────────────
 
     async def _aget(
         self,
@@ -46,7 +24,6 @@ class GammaClient:
         params: dict = None,
         _retries: int = 2,
     ) -> dict | list:
-        """Async GET request dengan retry untuk timeout transient."""
         url = f"{self.host}{endpoint}"
         for attempt in range(_retries + 1):
             try:
@@ -59,7 +36,7 @@ class GammaClient:
                     return await resp.json()
             except asyncio.TimeoutError:
                 if attempt < _retries:
-                    wait = 2 ** attempt  # 1s, 2s
+                    wait = 2 ** attempt
                     logger.warning(f"Gamma timeout {endpoint} (attempt {attempt+1}), retry in {wait}s")
                     await asyncio.sleep(wait)
                     continue
@@ -69,12 +46,7 @@ class GammaClient:
                 logger.error(f"Gamma API async error endpoint={endpoint}: {e}")
                 raise
 
-    # ─────────────────────────────────────────────
-    # SYNC HTTP (fallback)
-    # ─────────────────────────────────────────────
-
     def _get(self, endpoint: str, params: dict = None) -> dict | list:
-        """Sync GET request — untuk script standalone."""
         url = f"{self.host}{endpoint}"
         try:
             resp = self._sync_session.get(url, params=params, timeout=10)
@@ -83,10 +55,6 @@ class GammaClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Gamma API error endpoint={endpoint}: {e}")
             raise
-
-    # ─────────────────────────────────────────────
-    # MARKET FETCHING — ASYNC
-    # ─────────────────────────────────────────────
 
     async def aget_markets(
         self,
@@ -98,7 +66,6 @@ class GammaClient:
         order: str = "volume24hr",
         ascending: bool = False,
     ) -> list[dict]:
-        """Async: Ambil daftar market."""
         params = {
             "limit": limit,
             "offset": offset,
@@ -118,7 +85,6 @@ class GammaClient:
         min_days_to_resolve: int = 1,
         limit: int = 100,
     ) -> list[dict]:
-        """Async: Scan market aktif dan filter."""
         markets = await self.aget_markets(session, limit=limit, active=True)
         return self._filter_markets(
             markets, min_volume, min_liquidity,
@@ -134,7 +100,6 @@ class GammaClient:
         min_minutes_to_resolve: int = 5,
         limit: int = 500,
     ) -> list[dict]:
-        """Async: Scan hourly markets — filter berdasarkan menit, bukan hari."""
         markets = await self.aget_markets(
             session, limit=limit, active=True, closed=False
         )
@@ -142,10 +107,6 @@ class GammaClient:
             markets, min_volume, min_liquidity,
             max_minutes_to_resolve, min_minutes_to_resolve,
         )
-
-    # ─────────────────────────────────────────────
-    # MARKET FETCHING — SYNC (backward compat)
-    # ─────────────────────────────────────────────
 
     def get_markets(
         self,
@@ -174,21 +135,38 @@ class GammaClient:
         min_days_to_resolve: int = 1,
         limit: int = 100,
     ) -> list[dict]:
-        """Sync: Scan market aktif dan filter."""
         markets = self.get_markets(limit=limit, active=True)
         return self._filter_markets(
             markets, min_volume, min_liquidity,
             max_days_to_resolve, min_days_to_resolve
         )
 
-    # ─────────────────────────────────────────────
-    # SHARED FILTER LOGIC
-    # ─────────────────────────────────────────────
-
-    # Kategori yang tidak bisa dimodel — skip untuk hemat compute
-    SKIP_CATEGORIES = {
-        "sports", "entertainment", "music", "awards",
-        "tv", "movies", "gaming", "esports",
+    SKIP_SERIES_KEYWORDS = {
+        "league",
+        "ligue",
+        "liga",
+        "serie-a",
+        "nba",
+        "mlb",
+        "nfl",
+        "nhl",
+        "mls",
+        "ucl",
+        "atp",
+        "wta",
+        "ipl",
+        "cricket",
+        "counter-strike",
+        "dota",
+        "valorant",
+        "esports",
+        "ufc",
+        "mma",
+        "boxing",
+        "golf",
+        "rugby",
+        "nascar",
+        "formula",
     }
 
     def _filter_markets_hourly(
@@ -199,7 +177,6 @@ class GammaClient:
         max_minutes_to_resolve: int,
         min_minutes_to_resolve: int,
     ) -> list[dict]:
-        """Filter hourly markets — berbasis menit bukan hari."""
         now = datetime.now(timezone.utc)
         results = []
         skip = {"status": 0, "orderbook": 0, "category": 0, "volume": 0, "liquidity": 0, "time": 0}
@@ -207,7 +184,6 @@ class GammaClient:
         for m in markets:
             mid = (m.get("conditionId") or m.get("id") or "?")[:8]
             try:
-                # ── 1. Status — cek paling awal, paling murah ─────────
                 if m.get("closed") is True:
                     logger.debug(f"Skip {mid}: closed=true")
                     skip["status"] += 1
@@ -225,19 +201,20 @@ class GammaClient:
                     skip["status"] += 1
                     continue
 
-                # ── 2. Order book — hanya market yang bisa di-trade ──
                 if m.get("enableOrderBook") is False:
                     logger.debug(f"Skip {mid}: enableOrderBook=false")
                     skip["orderbook"] += 1
                     continue
 
-                # ── 3. Kategori non-modelable ─────────────────────────
-                category = (m.get("category") or "").lower().strip()
-                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                events_list = m.get("events") or []
+                series_slug = ""
+                if events_list and isinstance(events_list, list):
+                    series_slug = (events_list[0].get("seriesSlug") or "").lower()
+                if series_slug and any(kw in series_slug for kw in self.SKIP_SERIES_KEYWORDS):
+                    logger.debug(f"Skip {mid}: seriesSlug={series_slug!r}")
                     skip["category"] += 1
                     continue
 
-                # ── 4. Volume & likuiditas ────────────────────────────
                 volume = float(m.get("volume", 0) or 0)
                 if volume < min_volume:
                     logger.debug(f"Skip {mid}: volume ${volume:,.0f} < ${min_volume:,.0f}")
@@ -250,7 +227,6 @@ class GammaClient:
                     skip["liquidity"] += 1
                     continue
 
-                # ── 5. Window waktu ───────────────────────────────────
                 end_date_str = m.get("endDate") or m.get("end_date_iso")
                 if not end_date_str:
                     logger.debug(f"Skip {mid}: endDate missing")
@@ -300,7 +276,6 @@ class GammaClient:
         max_days_to_resolve: int,
         min_days_to_resolve: int,
     ) -> list[dict]:
-        """Filter logic — sama untuk sync dan async."""
         now = datetime.now(timezone.utc)
         results = []
         skip = {"status": 0, "orderbook": 0, "category": 0, "volume": 0, "liquidity": 0, "time": 0}
@@ -308,7 +283,6 @@ class GammaClient:
         for m in markets:
             mid = (m.get("conditionId") or m.get("id") or "?")[:8]
             try:
-                # ── 1. Status ─────────────────────────────────────────
                 if m.get("closed") is True:
                     skip["status"] += 1
                     continue
@@ -322,18 +296,18 @@ class GammaClient:
                     skip["status"] += 1
                     continue
 
-                # ── 2. Order book ─────────────────────────────────────
                 if m.get("enableOrderBook") is False:
                     skip["orderbook"] += 1
                     continue
 
-                # ── 3. Kategori non-modelable ─────────────────────────
-                category = (m.get("category") or "").lower().strip()
-                if any(cat in category for cat in self.SKIP_CATEGORIES):
+                events_list = m.get("events") or []
+                series_slug = ""
+                if events_list and isinstance(events_list, list):
+                    series_slug = (events_list[0].get("seriesSlug") or "").lower()
+                if series_slug and any(kw in series_slug for kw in self.SKIP_SERIES_KEYWORDS):
                     skip["category"] += 1
                     continue
 
-                # ── 4. Volume & likuiditas ────────────────────────────
                 volume = float(m.get("volume", 0) or 0)
                 if volume < min_volume:
                     skip["volume"] += 1
@@ -344,7 +318,6 @@ class GammaClient:
                     skip["liquidity"] += 1
                     continue
 
-                # ── 5. Window waktu ───────────────────────────────────
                 end_date_str = m.get("endDate") or m.get("end_date_iso")
                 if not end_date_str:
                     skip["time"] += 1
@@ -376,13 +349,8 @@ class GammaClient:
         )
         return results
 
-    # ─────────────────────────────────────────────
-    # TOKEN & PRICE HELPERS (tidak butuh async)
-    # ─────────────────────────────────────────────
-
     @staticmethod
     def extract_token_ids(market: dict) -> list[dict]:
-        """Ekstrak token_id dari market untuk dipakai di CLOB API."""
         import json
         tokens         = []
         outcomes       = market.get("outcomes", [])
@@ -413,7 +381,6 @@ class GammaClient:
 
     @staticmethod
     def get_token_prices(market: dict) -> dict:
-        """Ambil harga dari market data Gamma. Return: {"Yes": 0.72, "No": 0.28}"""
         import json
         prices         = {}
         outcomes       = market.get("outcomes", [])
@@ -448,14 +415,6 @@ class GammaClient:
         condition_id: str,
         session: aiohttp.ClientSession,
     ) -> Optional[dict]:
-        """
-        Async: Fetch single market by condition_id (the 0x... on-chain id).
-
-        Gamma `/markets/{id}` minta numeric id internal — gak cocok buat condition_id.
-        Pakai list endpoint + filter `condition_ids` (plural). Default endpoint
-        skip closed markets, jadi try `closed=false` dulu, fallback `closed=true`.
-        Return None kalau gak ketemu di kedua state.
-        """
         for closed_flag in ("false", "true"):
             try:
                 results = await self._aget(
@@ -481,11 +440,6 @@ class GammaClient:
             f"   Vol: ${volume:,.0f} | Liq: ${liquidity:,.0f} | "
             f"Resolve: {days}d | {price_str}"
         )
-
-
-# ─────────────────────────────────────────────
-# QUICK TEST
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     import json

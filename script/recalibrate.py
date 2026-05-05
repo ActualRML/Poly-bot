@@ -1,15 +1,3 @@
-"""
-script/recalibrate.py
-=====================
-Auto-recalibrate CALIBRATION_CORRECTION di probability.py.
-Jalankan bulanan atau saat market regime berubah drastis.
-
-Jalankan:
-    python -m script.recalibrate
-
-Cron job VPS (tiap tanggal 1 jam 02:00):
-    0 2 1 * * cd /path/to/polymarket-bot && python -m script.recalibrate
-"""
 
 import os
 import sys
@@ -24,36 +12,25 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
 ASSETS              = ["BTC", "ETH", "SOL", "BNB"]
-# Per-asset window — BNB butuh 365d (regime kurang konsisten di window pendek),
-# yang lain cukup 90d untuk capture regime terkini.
+
 DAYS_BY_ASSET       = {
     "BTC": 90,
     "ETH": 90,
     "SOL": 90,
     "BNB": 365,
 }
-CORRECTION_MIN      = 0.05   # diff minimum untuk apply correction (5%)
+CORRECTION_MIN      = 0.05
 PROB_PATH           = _ROOT / "src" / "logic" / "probability.py"
 
-# Regex untuk parse baris hasil backtest:
-# "  +8%   |    11.2%  |   5.5%  |  +5.7%  |      91  | ⚠️ ..."
 _ROW_PATTERN = re.compile(
-    r"\+(\d+)%\s+\|"           # target pct
-    r"\s+[\d.]+%\s+\|"         # pred avg
-    r"\s+[\d.]+%\s+\|"         # actual
-    r"\s+([+-][\d.]+)%\s+\|"   # diff  ← yang kita butuhkan
+    r"\+(\d+)%\s+\|"
+    r"\s+[\d.]+%\s+\|"
+    r"\s+[\d.]+%\s+\|"
+    r"\s+([+-][\d.]+)%\s+\|"
 )
 
-
-# ─────────────────────────────────────────────
-# BACKTEST RUNNER
-# ─────────────────────────────────────────────
-
 def run_backtest(asset: str, barrier: bool = False) -> dict[float, float]:
-    """
-    Jalankan satu backtest, parse Diff per target.
-    Return {target_pct: correction} hanya untuk target yang over-estimate > CORRECTION_MIN.
-    """
+
     days = DAYS_BY_ASSET.get(asset, 90)
     cmd = [
         sys.executable, "-m", "script.backtest_mispricing",
@@ -80,16 +57,11 @@ def run_backtest(asset: str, barrier: bool = False) -> dict[float, float]:
         if not m:
             continue
         target_pct = int(m.group(1)) / 100
-        diff       = float(m.group(2)) / 100   # fraction
+        diff       = float(m.group(2)) / 100
         if diff > CORRECTION_MIN:
             corrections[target_pct] = round(diff, 2)
 
     return corrections
-
-
-# ─────────────────────────────────────────────
-# PROBABILITY.PY UPDATER
-# ─────────────────────────────────────────────
 
 def _format_asset_corrections(asset_map: dict[str, dict[float, float]]) -> str:
     lines = []
@@ -101,15 +73,11 @@ def _format_asset_corrections(asset_map: dict[str, dict[float, float]]) -> str:
         lines.append(f'        "{asset}":  {{{items}}},')
     return "\n".join(lines)
 
-
 def update_probability_py(
     at_expiry: dict[str, dict[float, float]],
     barrier:   dict[str, dict[float, float]],
 ) -> bool:
-    """
-    Replace blok CALIBRATION_CORRECTION di probability.py dengan nilai baru.
-    Return True kalau berhasil.
-    """
+
     content     = PROB_PATH.read_text(encoding="utf-8")
     ae_str      = _format_asset_corrections(at_expiry)
     barrier_str = _format_asset_corrections(barrier)
@@ -137,11 +105,6 @@ def update_probability_py(
     PROB_PATH.write_text(new_content, encoding="utf-8")
     return True
 
-
-# ─────────────────────────────────────────────
-# TELEGRAM NOTIF
-# ─────────────────────────────────────────────
-
 async def send_telegram(text: str) -> None:
     try:
         from src.utils.config import config
@@ -157,11 +120,6 @@ async def send_telegram(text: str) -> None:
             )
     except Exception as e:
         print(f"Telegram gagal: {e}")
-
-
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
 
 def main():
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -203,7 +161,6 @@ def main():
     print("=" * 60)
     print("  Recalibrate selesai.")
     print("=" * 60 + "\n")
-
 
 if __name__ == "__main__":
     main()

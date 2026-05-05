@@ -1,13 +1,3 @@
-"""
-src/models/database.py
-======================
-SQLite CRUD layer — simpan & query posisi aktif dan trade history.
-
-Prinsip:
-- Satu file SQLite di data/bot_database.db
-- Semua operasi lewat sini, tidak ada raw SQL di tempat lain
-- Thread-safe via check_same_thread=False + context manager
-"""
 
 import sqlite3
 import logging
@@ -20,11 +10,6 @@ from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "bot_database.db"
-
-
-# ─────────────────────────────────────────────
-# CONNECTION
-# ─────────────────────────────────────────────
 
 @contextmanager
 def get_conn():
@@ -40,11 +25,6 @@ def get_conn():
         raise
     finally:
         conn.close()
-
-
-# ─────────────────────────────────────────────
-# SCHEMA
-# ─────────────────────────────────────────────
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
@@ -109,22 +89,16 @@ CREATE TABLE IF NOT EXISTS predictions (
 CREATE INDEX IF NOT EXISTS idx_predictions_resolved ON predictions(actual_outcome);
 """
 
-
 def init_db():
-    """Inisialisasi database — buat tabel kalau belum ada."""
+
     with get_conn() as conn:
         conn.executescript(SCHEMA)
-        # ── Migrasi: tambah kolom baru kalau belum ada ─────────────
+
         _migrate(conn)
     logger.info(f"Database ready: {DB_PATH}")
 
-
 def _migrate(conn):
-    """
-    Tambah kolom baru ke tabel existing kalau belum ada.
-    SQLite tidak support ALTER TABLE ADD COLUMN IF NOT EXISTS,
-    jadi kita cek dulu via PRAGMA.
-    """
+
     existing = {
         row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()
     }
@@ -143,19 +117,8 @@ def _migrate(conn):
                 logger.error(f"[DB MIGRATE] Gagal tambah kolom '{col}': {e}")
                 raise
 
-
-# ─────────────────────────────────────────────
-# POSITIONS CRUD
-# ─────────────────────────────────────────────
-
 def save_position(pos: dict) -> int:
-    """
-    Insert atau update posisi aktif.
-    pos dict keys: condition_id, question, outcome, entry_price,
-                   current_price, highest_price, shares, capital_at_risk,
-                   resolve_date, entry_time, gap_pct, kelly_fraction, strategy_mode
-    Returns: row id
-    """
+
     sql = """
         INSERT INTO positions
             (condition_id, question, outcome, entry_price, current_price,
@@ -184,14 +147,13 @@ def save_position(pos: dict) -> int:
             pnl_usdc        = NULL,
             exit_reason     = NULL
     """
-    # Normalize semua Decimal ke string
+
     normalized = {k: str(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
     if isinstance(normalized.get("resolve_date"), datetime):
         normalized["resolve_date"] = normalized["resolve_date"].isoformat()
     if isinstance(normalized.get("entry_time"), datetime):
         normalized["entry_time"] = normalized["entry_time"].isoformat()
 
-    # Default optional fields
     normalized.setdefault("gap_pct", None)
     normalized.setdefault("kelly_fraction", None)
     normalized.setdefault("strategy_mode", None)
@@ -201,9 +163,8 @@ def save_position(pos: dict) -> int:
         cur = conn.execute(sql, normalized)
         return cur.lastrowid
 
-
 def update_position_price(condition_id: str, outcome: str, current_price: Decimal):
-    """Update harga terkini dan highest_price posisi."""
+
     sql = """
         UPDATE positions SET
             current_price = :current_price,
@@ -217,9 +178,8 @@ def update_position_price(condition_id: str, outcome: str, current_price: Decima
             "current_price": str(current_price),
         })
 
-
 def update_position_token_id(condition_id: str, outcome: str, token_id: str):
-    """Backfill token_id untuk posisi lama yang tersimpan tanpa token_id."""
+
     sql = """
         UPDATE positions SET token_id = :token_id
         WHERE condition_id = :condition_id AND outcome = :outcome AND status = 'open'
@@ -231,7 +191,6 @@ def update_position_token_id(condition_id: str, outcome: str, token_id: str):
             "token_id": token_id,
         })
 
-
 def close_position(
     condition_id: str,
     outcome: str,
@@ -239,7 +198,7 @@ def close_position(
     exit_reason: str,
     pnl_usdc: Decimal,
 ):
-    """Tutup posisi — set status closed, isi exit fields."""
+
     sql = """
         UPDATE positions SET
             status     = 'closed',
@@ -259,18 +218,16 @@ def close_position(
             "exit_reason": exit_reason,
         })
 
-
 def get_open_positions() -> list[dict]:
-    """Ambil semua posisi yang masih open."""
+
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_time"
         ).fetchall()
         return [dict(r) for r in rows]
 
-
 def get_position(condition_id: str, outcome: str) -> Optional[dict]:
-    """Ambil satu posisi by condition_id + outcome."""
+
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM positions WHERE condition_id = ? AND outcome = ? AND status = 'open'",
@@ -278,9 +235,8 @@ def get_position(condition_id: str, outcome: str) -> Optional[dict]:
         ).fetchone()
         return dict(row) if row else None
 
-
 def get_position_by_market(condition_id: str) -> Optional[dict]:
-    """Ambil posisi open di market ini (YES atau NO) — cegah beli kedua sisi."""
+
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM positions WHERE condition_id = ? AND status = 'open' LIMIT 1",
@@ -288,25 +244,14 @@ def get_position_by_market(condition_id: str) -> Optional[dict]:
         ).fetchone()
         return dict(row) if row else None
 
-
 def count_open_positions() -> int:
     with get_conn() as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM positions WHERE status = 'open'"
         ).fetchone()[0]
 
-
-# ─────────────────────────────────────────────
-# TRADES LOG
-# ─────────────────────────────────────────────
-
 def log_trade(trade: dict):
-    """
-    Catat satu trade ke history.
-    trade dict keys: condition_id, question, outcome, action, price,
-                     shares, usdc_amount, strategy_mode, gap_pct,
-                     kelly_fraction, notes
-    """
+
     sql = """
         INSERT INTO trades
             (condition_id, question, outcome, action, price, shares,
@@ -325,18 +270,16 @@ def log_trade(trade: dict):
     with get_conn() as conn:
         conn.execute(sql, normalized)
 
-
 def get_trade_history(limit: int = 50) -> list[dict]:
-    """Ambil trade history terbaru."""
+
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
-
 def get_stats() -> dict:
-    """Statistik ringkas PnL dari semua posisi yang sudah closed."""
+
     with get_conn() as conn:
         row = conn.execute("""
             SELECT
@@ -353,17 +296,8 @@ def get_stats() -> dict:
         d["winrate"] = round(wins / total * 100, 1) if total > 0 else 0
         return d
 
-
-# ─────────────────────────────────────────────
-# MODEL ACCURACY TRACKER
-# ─────────────────────────────────────────────
-
 def log_prediction(data: dict):
-    """
-    Catat prediksi model saat posisi dibuka.
-    data keys: condition_id, question, outcome, predicted_prob,
-               market_price, gap_pct, resolve_date
-    """
+
     sql = """
         INSERT INTO predictions
             (condition_id, question, outcome, predicted_prob,
@@ -379,9 +313,8 @@ def log_prediction(data: dict):
     with get_conn() as conn:
         conn.execute(sql, normalized)
 
-
 def resolve_prediction(condition_id: str, outcome: str, won: bool, resolve_price: float):
-    """Catat hasil aktual saat posisi closed/resolved."""
+
     sql = """
         UPDATE predictions SET
             actual_outcome = :actual_outcome,
@@ -398,13 +331,8 @@ def resolve_prediction(condition_id: str, outcome: str, won: bool, resolve_price
             "resolved_at":    datetime.now(timezone.utc).isoformat(),
         })
 
-
 def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
-    """
-    Ambil PnL dari N posisi terakhir yang sudah closed.
-    Return format: [{"pnl": float}, ...] ordered terlama ke terbaru.
-    Dipakai oleh calculate_position_size() di risk_manager.py.
-    """
+
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT pnl_usdc FROM positions
@@ -412,15 +340,11 @@ def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()
-    # Reversed: terlama [0] → terbaru [-1]
+
     return [{"pnl": float(r["pnl_usdc"])} for r in reversed(rows)]
 
-
 def get_accuracy_report() -> dict:
-    """
-    Laporan kalibrasi model — seberapa akurat prediksi kita vs outcome nyata.
-    Hanya menghitung prediksi yang sudah resolved.
-    """
+
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT predicted_prob, market_price, gap_pct, actual_outcome
@@ -438,11 +362,10 @@ def get_accuracy_report() -> dict:
     avg_market = sum(float(r["market_price"]) for r in rows) / total
     winrate    = wins / total
 
-    # Kalibrasi: bagi prediksi ke bucket 10% dan hitung actual win rate per bucket
     buckets: dict[int, list] = {}
     for r in rows:
         p      = float(r["predicted_prob"])
-        bucket = int(p * 10) * 10   # 0, 10, 20, ... 90
+        bucket = int(p * 10) * 10
         buckets.setdefault(bucket, []).append(r["actual_outcome"])
 
     calibration = {
@@ -455,7 +378,6 @@ def get_accuracy_report() -> dict:
         if len(v) >= 2
     }
 
-    # Mean Absolute Error antara predicted prob dan actual outcome
     mae = sum(abs(float(r["predicted_prob"]) - r["actual_outcome"]) for r in rows) / total
 
     return {
@@ -469,7 +391,6 @@ def get_accuracy_report() -> dict:
         "calibration":   calibration,
         "verdict":       _calibration_verdict(winrate, avg_pred, mae),
     }
-
 
 def _calibration_verdict(winrate: float, avg_pred: float, mae: float) -> str:
     if mae < 0.10:

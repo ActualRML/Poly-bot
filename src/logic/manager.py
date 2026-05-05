@@ -1,16 +1,3 @@
-"""
-src/logic/manager.py
-====================
-Position Manager — gatekeeper sebelum bot buka posisi baru.
-
-Tugasnya:
-1. Cek database: sudah ada posisi di market ini belum?
-2. Cek kapasitas: sudah berapa posisi open? Masih boleh buka lagi?
-3. Convert MispricingResult + KellyResult → Position object (siap pakai ExitEvaluator)
-4. Sync harga terkini ke database
-5. Evaluasi exit untuk semua posisi open
-"""
-
 import logging
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -34,26 +21,10 @@ from src.logic.pricing import ke_decimal
 
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-
-MAX_OPEN_POSITIONS = 5       # Maksimal posisi bersamaan
-MAX_CAPITAL_PER_MARKET = 30  # Persen maksimal modal di satu market
-
-
-# ─────────────────────────────────────────────
-# POSITION MANAGER
-# ─────────────────────────────────────────────
+MAX_OPEN_POSITIONS = 5
+MAX_CAPITAL_PER_MARKET = 30
 
 class PositionManager:
-    """
-    Gatekeeper antara logic bot dan database.
-
-    Setiap kali bot mau buka posisi baru, harus lewat sini dulu.
-    Manager yang memutuskan: boleh masuk atau tidak.
-    """
 
     def __init__(
         self,
@@ -68,10 +39,6 @@ class PositionManager:
         init_db()
         logger.info(f"PositionManager ready | max_open={self.max_open}")
 
-    # ─────────────────────────────────────────────
-    # ENTRY GATE
-    # ─────────────────────────────────────────────
-
     def can_open(
         self,
         condition_id: str,
@@ -79,25 +46,14 @@ class PositionManager:
         bet_usdc: Decimal,
         total_capital: Decimal,
     ) -> tuple[bool, str]:
-        """
-        Cek apakah bot boleh buka posisi baru.
-
-        Returns:
-            (True, "") kalau boleh
-            (False, alasan) kalau tidak boleh
-        """
-        # Sudah ada posisi di market ini (YES atau NO)?
-        # Cegah beli kedua sisi market yang sama — guaranteed loss.
         existing_market = get_position_by_market(condition_id)
         if existing_market:
             return False, f"Sudah ada posisi open di market {condition_id[:8]}... ({existing_market['outcome']})"
 
-        # Kapasitas penuh?
         open_count = count_open_positions()
         if open_count >= self.max_open:
             return False, f"Max posisi tercapai ({open_count}/{self.max_open})"
 
-        # Over-concentration? (terlalu banyak modal di satu market)
         if total_capital > Decimal("0"):
             pct = float(bet_usdc / total_capital * 100)
             if pct > self.max_capital_per_market:
@@ -119,10 +75,6 @@ class PositionManager:
         strategy_mode: str = "mispricing",
         token_id: str = "",
     ) -> bool:
-        """
-        Buka posisi baru — simpan ke database dan log trade entry.
-        Returns True kalau berhasil.
-        """
         now = datetime.now(timezone.utc)
 
         pos_data = {
@@ -165,20 +117,7 @@ class PositionManager:
             logger.error(f"Gagal open posisi {condition_id}: {e}")
             return False
 
-    # ─────────────────────────────────────────────
-    # EXIT EVALUATION
-    # ─────────────────────────────────────────────
-
     def evaluate_exits(self, current_prices: dict[str, dict[str, Decimal]]) -> list[ExitDecision]:
-        """
-        Evaluasi semua posisi open apakah perlu di-exit.
-
-        Args:
-            current_prices: {condition_id: {"Yes": Decimal, "No": Decimal}}
-
-        Returns:
-            List ExitDecision yang should_exit=True
-        """
         raw_positions = get_open_positions()
         if not raw_positions:
             return []
@@ -188,7 +127,6 @@ class PositionManager:
             cid = row["condition_id"]
             outcome = row["outcome"]
 
-            # Update harga terkini kalau ada
             new_price = (current_prices.get(cid) or {}).get(outcome)
             if new_price:
                 update_position_price(cid, outcome, new_price)
@@ -201,14 +139,12 @@ class PositionManager:
 
         exits = self.portfolio_manager.get_exits(positions)
 
-        # Proses exits
         for decision in exits:
             self._process_exit(decision)
 
         return exits
 
     def _process_exit(self, decision: ExitDecision):
-        """Tutup posisi di database dan log trade exit."""
         pos = decision.position
         pnl = decision.estimated_pnl_usdc or Decimal("0")
 
@@ -240,12 +176,7 @@ class PositionManager:
             f"{decision.signal.value} | PnL: ${float(pnl):+.2f}"
         )
 
-    # ─────────────────────────────────────────────
-    # HELPERS
-    # ─────────────────────────────────────────────
-
     def _row_to_position(self, row: dict, current_price: Decimal) -> Position:
-        """Convert database row → Position object untuk ExitEvaluator."""
         resolve_date = datetime.fromisoformat(row["resolve_date"])
         if resolve_date.tzinfo is None:
             resolve_date = resolve_date.replace(tzinfo=timezone.utc)
@@ -276,7 +207,6 @@ class PositionManager:
         pnl: Decimal,
         reason: str,
     ):
-        """Close posisi secara manual — dipakai resolve checker."""
         pos_row = get_position(condition_id, outcome)
         question = pos_row["question"] if pos_row else ""
         shares   = ke_decimal(pos_row["shares"]) if pos_row else Decimal("0")
@@ -306,7 +236,6 @@ class PositionManager:
         )
 
     def get_unrealized_pnl(self) -> float:
-        """Total unrealized PnL dari semua posisi open (negatif = rugi)."""
         positions = get_open_positions()
         return sum(
             (float(p["current_price"]) - float(p["entry_price"])) * float(p["shares"])
@@ -314,7 +243,6 @@ class PositionManager:
         )
 
     def get_summary(self) -> str:
-        """Ringkasan status portfolio saat ini."""
         open_count = count_open_positions()
         stats = get_stats()
         total = stats.get("total_trades") or 0
