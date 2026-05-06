@@ -35,6 +35,12 @@ class Position:
         return max(0, delta.days)
 
     @property
+    def minutes_to_resolve(self) -> float:
+        now = datetime.now(timezone.utc)
+        delta = self.resolve_date - now
+        return max(0.0, delta.total_seconds() / 60)
+
+    @property
     def days_held(self) -> int:
         now = datetime.now(timezone.utc)
         return (now - self.entry_time).days
@@ -82,6 +88,12 @@ class ExitEvaluator:
         days_hold_to_resolve: int = 3,
         max_days_stale: int = 21,
         stale_movement_threshold: float = 0.05,
+        profit_lock_pct: float = 20.0,
+        profit_lock_high_pct: float = 35.0,
+        updown_profit_lock_pct: float = 40.0,
+        updown_profit_lock_high_pct: float = 60.0,
+        hourly_profit_lock_pct: float = 70.0,
+        hourly_profit_lock_high_pct: float = 85.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -89,9 +101,35 @@ class ExitEvaluator:
         self.days_hold_to_resolve = days_hold_to_resolve
         self.max_days_stale = max_days_stale
         self.stale_movement_threshold = ke_decimal(stale_movement_threshold)
+        self.profit_lock_pct = profit_lock_pct
+        self.profit_lock_high_pct = profit_lock_high_pct
+        self.updown_profit_lock_pct = updown_profit_lock_pct
+        self.updown_profit_lock_high_pct = updown_profit_lock_high_pct
+        self.hourly_profit_lock_pct = hourly_profit_lock_pct
+        self.hourly_profit_lock_high_pct = hourly_profit_lock_high_pct
+
+    _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
+    _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
+    _HOURLY_STRATEGIES = {"updown_hourly", "updown_hourly_dry_run"}
 
     def evaluate(self, pos: Position) -> ExitDecision:
-        if pos.strategy_mode in ("updown_hourly", "updown_hourly_dry_run"):
+        if pos.strategy_mode in self._HOURLY_STRATEGIES:
+            mins = pos.minutes_to_resolve
+            pnl_pct = float(pos.unrealized_pnl_pct)
+            if (mins > 45 and pnl_pct >= self.hourly_profit_lock_pct) or \
+               (mins > 30 and pnl_pct >= self.hourly_profit_lock_high_pct):
+                pnl = self._calc_pnl(pos)
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    suggested_exit_price=pos.current_price,
+                    estimated_pnl_usdc=pnl,
+                    reason=(
+                        f"Profit lock hourly! PnL {pnl_pct:+.1f}% | "
+                        f"{mins:.0f}m tersisa → exit dini"
+                    ),
+                )
             return ExitDecision(
                 signal=ExitSignal.HOLD,
                 should_exit=False,
@@ -99,6 +137,31 @@ class ExitEvaluator:
                 estimated_pnl_usdc=self._calc_pnl(pos),
                 reason="Hold to resolve — hourly binary market, no trailing stop",
             )
+
+        if pos.strategy_mode in self._DAILY_STRATEGIES:
+            lock_pct, lock_high_pct = self.profit_lock_pct, self.profit_lock_high_pct
+        elif pos.strategy_mode in self._UPDOWN_STRATEGIES:
+            lock_pct, lock_high_pct = self.updown_profit_lock_pct, self.updown_profit_lock_high_pct
+        else:
+            lock_pct, lock_high_pct = None, None
+
+        if lock_pct is not None:
+            mins = pos.minutes_to_resolve
+            pnl_pct = float(pos.unrealized_pnl_pct)
+            if (mins > 60 and pnl_pct >= lock_pct) or \
+               (mins > 30 and pnl_pct >= lock_high_pct):
+                pnl = self._calc_pnl(pos)
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    suggested_exit_price=pos.current_price,
+                    estimated_pnl_usdc=pnl,
+                    reason=(
+                        f"Profit lock! PnL {pnl_pct:+.1f}% | "
+                        f"{mins:.0f}m tersisa → exit dini"
+                    ),
+                )
 
         if pos.current_price >= self.profit_threshold:
 

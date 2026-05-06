@@ -1103,8 +1103,18 @@ async def _analyze_updown_hourly_market(
     except Exception:
         return
 
-    delta_sec = (end_date - datetime.now(timezone.utc)).total_seconds()
+    now = datetime.now(timezone.utc)
+    delta_sec = (end_date - now).total_seconds()
     if delta_sec <= 0:
+        return
+
+    candle_open_min = getattr(config, "UPDOWN_HOURLY_CANDLE_OPEN_MIN", 10)
+    if now < start_date + timedelta(minutes=candle_open_min):
+        logger.debug(
+            f"[UPDOWN HOURLY] {symbol} candle baru buka "
+            f"{(now - start_date).total_seconds() / 60:.1f}m — "
+            f"tunggu {candle_open_min}m setelah open"
+        )
         return
 
     prob_up = await calculate_updown_probability_hourly(
@@ -1270,10 +1280,17 @@ async def run_mispricing_mode(clob: ClobClient):
     manager = PositionManager(
         max_open_positions     = getattr(config, "MAX_OPEN_POSITIONS", 5),
         max_capital_per_market = getattr(config, "MAX_CAPITAL_PER_MARKET", 30.0),
+        max_same_direction     = getattr(config, "MAX_SAME_DIRECTION", 2),
         exit_evaluator         = ExitEvaluator(
             trailing_stop_pct       = getattr(config, "TRAILING_STOP_PCT", 0.15),
             profit_threshold        = getattr(config, "PROFIT_THRESHOLD", 0.75),
             tight_trailing_stop_pct = getattr(config, "TIGHT_TRAILING_STOP_PCT", 0.07),
+            profit_lock_pct              = getattr(config, "PROFIT_LOCK_PCT", 20.0),
+            profit_lock_high_pct         = getattr(config, "PROFIT_LOCK_HIGH_PCT", 35.0),
+            updown_profit_lock_pct       = getattr(config, "UPDOWN_PROFIT_LOCK_PCT", 40.0),
+            updown_profit_lock_high_pct  = getattr(config, "UPDOWN_PROFIT_LOCK_HIGH_PCT", 60.0),
+            hourly_profit_lock_pct       = getattr(config, "HOURLY_PROFIT_LOCK_PCT", 70.0),
+            hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 85.0),
         ),
     )
     builder = BaseRateBuilder()
@@ -1300,6 +1317,7 @@ async def run_mispricing_mode(clob: ClobClient):
         await _backfill_missing_token_ids(gamma, session)
         await reconcile_positions(clob, gamma, manager, breaker, session)
 
+        _cb_alerted = False
         while True:
             try:
                 await _backfill_missing_token_ids(gamma, session)
@@ -1307,9 +1325,10 @@ async def run_mispricing_mode(clob: ClobClient):
                 closed_this_cycle |= await _resolve_checker(clob, gamma, manager, breaker, session)
 
                 if config.DRY_RUN:
-                    from src.models.database import get_open_positions as _get_open
-                    locked = sum(float(p["capital_at_risk"]) for p in _get_open())
-                    balance = max(0.0, float(config.SALDO_AWAL) - locked)
+                    from src.models.database import get_open_positions as _get_open, get_stats as _get_stats
+                    locked        = sum(float(p["capital_at_risk"]) for p in _get_open())
+                    realized_pnl  = float(_get_stats().get("total_pnl") or 0)
+                    balance       = max(0.0, float(config.SALDO_AWAL) + realized_pnl - locked)
                 else:
                     balance = clob.get_balance()
                 capital = balance
@@ -1378,15 +1397,18 @@ async def run_mispricing_mode(clob: ClobClient):
                 cb_status = breaker.check(unrealized_pnl=manager.get_unrealized_pnl())
                 if not cb_status.can_trade:
                     log.warning(f"[CIRCUIT BREAKER] {cb_status}")
-                    alert = get_alert()
-                    if alert:
-                        await alert.alert_circuit_breaker(
-                            reason       = str(cb_status),
-                            drawdown_pct = getattr(cb_status, "drawdown_pct", 0.0),
-                            session      = session,
-                        )
+                    if not _cb_alerted:
+                        alert = get_alert()
+                        if alert:
+                            await alert.alert_circuit_breaker(
+                                reason       = str(cb_status),
+                                drawdown_pct = getattr(cb_status, "drawdown_pct", 0.0),
+                                session      = session,
+                            )
+                        _cb_alerted = True
                     await asyncio.sleep(config.POLLING_INTERVAL)
                     continue
+                _cb_alerted = False
 
                 log.info(breaker.get_summary(unrealized_pnl=manager.get_unrealized_pnl()))
                 await _prefetch_prices(session)

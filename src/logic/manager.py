@@ -13,6 +13,7 @@ from src.models.database import (
     get_position,
     get_position_by_market,
     count_open_positions,
+    count_open_by_direction,
     log_trade,
     get_stats,
     resolve_prediction,
@@ -31,11 +32,13 @@ class PositionManager:
         max_open_positions: int = MAX_OPEN_POSITIONS,
         max_capital_per_market: float = MAX_CAPITAL_PER_MARKET,
         exit_evaluator: Optional[ExitEvaluator] = None,
+        max_same_direction: int = 0,
     ):
         self.max_open = max_open_positions
         self.max_capital_per_market = max_capital_per_market
         self.exit_evaluator = exit_evaluator or ExitEvaluator()
         self.portfolio_manager = PortfolioExitManager(self.exit_evaluator)
+        self.max_same_direction = max_same_direction
         init_db()
         logger.info(f"PositionManager ready | max_open={self.max_open}")
 
@@ -58,6 +61,11 @@ class PositionManager:
             pct = float(bet_usdc / total_capital * 100)
             if pct > self.max_capital_per_market:
                 return False, f"Bet {pct:.1f}% melebihi max {self.max_capital_per_market:.0f}% per market"
+
+        if self.max_same_direction > 0 and outcome in ("Up", "Down"):
+            direction_count = count_open_by_direction(outcome)
+            if direction_count >= self.max_same_direction:
+                return False, f"Max posisi {outcome} tercapai ({direction_count}/{self.max_same_direction})"
 
         return True, ""
 

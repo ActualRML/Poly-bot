@@ -287,6 +287,35 @@ ENTRY BLOCK — hanya kalau CB & safety OK:
 
 ---
 
+## Minimalisir Latency (saat Go Live)
+
+**1. VPS dekat server Polymarket (terbesar)**
+- Bot lokal di Indonesia: round-trip ke Polymarket US ~200–400ms per request
+- VPS US-East (AWS us-east-1, Vultr New Jersey, dll): turun ke ~20–50ms
+- Ini sendiri cut latency 5–10x, lakukan ini sebelum optimasi lain
+
+**2. Parallel API calls di path kritis**
+- Fetch harga + fetch order book harus `asyncio.gather()`, bukan sequential await
+- Cek di `main.py`: pastikan tidak ada await satu-satu yang bisa diparallelkan
+
+**3. Persistent HTTP session**
+- `aiohttp.ClientSession` dibuat sekali di startup, di-reuse selama bot jalan
+- Bukan dibuat baru per request (ada overhead TCP handshake tiap kali)
+
+**4. Kurangi langkah antara signal → order**
+- Path ideal: detect signal → validasi edge → send order
+- Semua data (harga, token_id) harus sudah tersedia dari prefetch sebelumnya
+- Tidak ada fetch tambahan di antara signal dan order placement
+
+| Langkah | Effort | Impact |
+|---|---|---|
+| VPS US-East | Medium | Sangat tinggi |
+| Parallel API calls | Low | Tinggi |
+| Persistent HTTP session | Low | Medium |
+| Reduce mid-path fetch | Medium | Medium |
+
+---
+
 ## Next Steps
 
 | Priority | Task |

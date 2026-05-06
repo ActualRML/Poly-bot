@@ -250,6 +250,13 @@ def count_open_positions() -> int:
             "SELECT COUNT(*) FROM positions WHERE status = 'open'"
         ).fetchone()[0]
 
+def count_open_by_direction(outcome: str) -> int:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE status = 'open' AND outcome = ?",
+            (outcome,)
+        ).fetchone()[0]
+
 def log_trade(trade: dict):
 
     sql = """

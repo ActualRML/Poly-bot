@@ -72,8 +72,12 @@ def main():
                 resolve = datetime.fromisoformat(resolve_str)
                 if resolve.tzinfo is None:
                     resolve = resolve.replace(tzinfo=timezone.utc)
-                days_left = max(0, (resolve - now).days)
-                resolve_label = f"{days_left}d"
+                secs_left = max(0, (resolve - now).total_seconds())
+                hours_left = secs_left / 3600
+                if hours_left < 1:
+                    resolve_label = f"{int(secs_left / 60)}m"
+                else:
+                    resolve_label = f"{hours_left:.1f}h"
             except Exception:
                 resolve_label = "?"
 
