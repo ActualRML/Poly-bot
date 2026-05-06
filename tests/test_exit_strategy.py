@@ -71,7 +71,7 @@ def test_hold_when_no_trigger():
 
 # ── updown_hourly trailing stop skip ─────────────────────────────────────────
 
-def make_hourly_position(strategy_mode: str, current: float, highest: float) -> Position:
+def make_hourly_position(strategy_mode: str, current: float, highest: float, minutes_left: int = 15) -> Position:
     return Position(
         condition_id="0xHOURLY",
         outcome="Up",
@@ -80,7 +80,7 @@ def make_hourly_position(strategy_mode: str, current: float, highest: float) -> 
         highest_price=Decimal(str(max(highest, current))),
         shares=Decimal("22.22"),
         capital_at_risk=Decimal("10.00"),
-        resolve_date=datetime.now(timezone.utc) + timedelta(minutes=30),
+        resolve_date=datetime.now(timezone.utc) + timedelta(minutes=minutes_left),
         entry_time=datetime.now(timezone.utc) - timedelta(minutes=25),
         strategy_mode=strategy_mode,
     )
@@ -103,12 +103,21 @@ def test_updown_hourly_never_exits_even_near_zero(strategy_mode):
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_never_exits_tight_stop_zone(strategy_mode):
-    # Masuk profit zone (current > 0.85) tapi tetap HOLD untuk hourly
-    pos = make_hourly_position(strategy_mode, current=0.88, highest=0.95)
+def test_updown_hourly_holds_near_expiry(strategy_mode):
+    # Near-expiry (< 20 menit), profit tinggi pun tetap HOLD
+    pos = make_hourly_position(strategy_mode, current=0.88, highest=0.95, minutes_left=15)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
     assert d.signal == ExitSignal.HOLD
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_profit_lock_triggers(strategy_mode):
+    # PnL >= 60% dan resolve > 20 menit → EXIT
+    pos = make_hourly_position(strategy_mode, current=0.75, highest=0.75, minutes_left=25)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
 
 
 def test_non_hourly_strategy_still_applies_trailing_stop():

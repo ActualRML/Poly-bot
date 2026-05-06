@@ -252,6 +252,7 @@ async def _analyze_market(
     market, clob, gamma, detector, sizer, manager,
     builder, breaker, capital, session, vol_data: dict | None = None,
     closed_this_cycle: set | None = None,
+    profit_locked_markets: set | None = None,
 ):
     from src.logic.pricing import ke_decimal
 
@@ -260,6 +261,9 @@ async def _analyze_market(
 
     if closed_this_cycle and condition_id in closed_this_cycle:
         logger.debug(f"Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
+    if profit_locked_markets and condition_id in profit_locked_markets:
+        logger.debug(f"Skip {condition_id[:8]} — profit locked this session, no re-entry")
         return
     prices       = gamma.get_token_prices(market)
     yes_price    = prices.get("Yes")
@@ -770,6 +774,7 @@ async def _analyze_updown_market(
     breaker, capital: float, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
     closed_this_cycle: set | None = None,
+    profit_locked_markets: set | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability
@@ -783,6 +788,9 @@ async def _analyze_updown_market(
 
     if closed_this_cycle and condition_id in closed_this_cycle:
         logger.debug(f"[UPDOWN] Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
+    if profit_locked_markets and condition_id in profit_locked_markets:
+        logger.debug(f"[UPDOWN] Skip {condition_id[:8]} — profit locked this session, no re-entry")
         return
     question     = market.get("question", market.get("title", f"{symbol} Up or Down Daily"))
 
@@ -1058,6 +1066,7 @@ async def _analyze_updown_hourly_market(
     breaker, capital: float, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
     closed_this_cycle: set | None = None,
+    profit_locked_markets: set | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability_hourly
@@ -1071,6 +1080,9 @@ async def _analyze_updown_hourly_market(
 
     if closed_this_cycle and condition_id in closed_this_cycle:
         logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
+    if profit_locked_markets and condition_id in profit_locked_markets:
+        logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} — profit locked this session, no re-entry")
         return
     question     = market.get("question", market.get("title", f"{symbol} Up or Down Hourly"))
 
@@ -1289,8 +1301,8 @@ async def run_mispricing_mode(clob: ClobClient):
             profit_lock_high_pct         = getattr(config, "PROFIT_LOCK_HIGH_PCT", 35.0),
             updown_profit_lock_pct       = getattr(config, "UPDOWN_PROFIT_LOCK_PCT", 40.0),
             updown_profit_lock_high_pct  = getattr(config, "UPDOWN_PROFIT_LOCK_HIGH_PCT", 60.0),
-            hourly_profit_lock_pct       = getattr(config, "HOURLY_PROFIT_LOCK_PCT", 70.0),
-            hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 85.0),
+            hourly_profit_lock_pct       = getattr(config, "HOURLY_PROFIT_LOCK_PCT", 60.0),
+            hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 60.0),
         ),
     )
     builder = BaseRateBuilder()
@@ -1318,6 +1330,7 @@ async def run_mispricing_mode(clob: ClobClient):
         await reconcile_positions(clob, gamma, manager, breaker, session)
 
         _cb_alerted = False
+        _profit_locked_markets: set[str] = set()
         while True:
             try:
                 await _backfill_missing_token_ids(gamma, session)
@@ -1361,6 +1374,9 @@ async def run_mispricing_mode(clob: ClobClient):
                 closed_this_cycle |= await _force_exit_check(clob, manager, breaker, current_prices, session)
                 exits = manager.evaluate_exits(current_prices)
                 closed_this_cycle |= {d.position.condition_id for d in exits}
+                for _d in exits:
+                    if _d.signal.value == "exit_lock_profit":
+                        _profit_locked_markets.add(_d.position.condition_id)
                 for decision in exits:
                     pos = decision.position
 
@@ -1443,6 +1459,7 @@ async def run_mispricing_mode(clob: ClobClient):
                             market, clob, gamma, detector, sizer, manager,
                             builder, breaker, capital, session, vol_data=vol_data,
                             closed_this_cycle=closed_this_cycle,
+                            profit_locked_markets=_profit_locked_markets,
                         )
                         for market in markets
                     ], return_exceptions=True)
@@ -1459,6 +1476,7 @@ async def run_mispricing_mode(clob: ClobClient):
                                 ud_mkt, clob, gamma, sizer, manager,
                                 breaker, capital, session, vol_data=vol_data,
                                 closed_this_cycle=closed_this_cycle,
+                                profit_locked_markets=_profit_locked_markets,
                             )
                         except Exception as e:
                             logger.warning(f"[UPDOWN DAILY] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
@@ -1472,6 +1490,7 @@ async def run_mispricing_mode(clob: ClobClient):
                                 hm, clob, gamma, sizer, manager,
                                 breaker, capital, session, vol_data=vol_data,
                                 closed_this_cycle=closed_this_cycle,
+                                profit_locked_markets=_profit_locked_markets,
                             )
                         except Exception as e:
                             logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")

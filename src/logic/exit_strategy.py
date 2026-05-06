@@ -92,8 +92,8 @@ class ExitEvaluator:
         profit_lock_high_pct: float = 35.0,
         updown_profit_lock_pct: float = 40.0,
         updown_profit_lock_high_pct: float = 60.0,
-        hourly_profit_lock_pct: float = 70.0,
-        hourly_profit_lock_high_pct: float = 85.0,
+        hourly_profit_lock_pct: float = 60.0,
+        hourly_profit_lock_high_pct: float = 60.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -116,8 +116,8 @@ class ExitEvaluator:
         if pos.strategy_mode in self._HOURLY_STRATEGIES:
             mins = pos.minutes_to_resolve
             pnl_pct = float(pos.unrealized_pnl_pct)
-            if (mins > 45 and pnl_pct >= self.hourly_profit_lock_pct) or \
-               (mins > 30 and pnl_pct >= self.hourly_profit_lock_high_pct):
+            if (mins > 30 and pnl_pct >= self.hourly_profit_lock_pct) or \
+               (mins > 20 and pnl_pct >= self.hourly_profit_lock_high_pct):
                 pnl = self._calc_pnl(pos)
                 return ExitDecision(
                     signal=ExitSignal.EXIT_LOCK_PROFIT,
