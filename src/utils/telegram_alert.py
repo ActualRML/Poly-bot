@@ -56,11 +56,13 @@ class TelegramAlert:
         ev: float,
         session: aiohttp.ClientSession,
         dry_run: bool = True,
+        strategy: str = "",
     ):
 
-        mode = "🔸 DRY RUN" if dry_run else "🟢 LIVE"
+        mode   = "🔸 DRY RUN" if dry_run else "🟢 LIVE"
+        label  = f" <i>({html.escape(strategy)})</i>" if strategy else ""
         msg = (
-            f"{mode} — <b>POSISI BARU</b>\n\n"
+            f"{mode} — <b>POSISI BARU</b>{label}\n\n"
             f"📌 <b>{html.escape(question[:60])}</b>\n\n"
             f"🎯 Outcome  : <b>BUY {html.escape(outcome)}</b> @ {price:.3f}\n"
             f"💰 Bet      : <b>${bet_usdc:.2f}</b>\n"

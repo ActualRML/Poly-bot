@@ -16,8 +16,8 @@ def get_conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         yield conn
         conn.commit()
     except Exception:
@@ -283,12 +283,12 @@ def get_stats() -> dict:
     with get_conn() as conn:
         row = conn.execute("""
             SELECT
-                COUNT(*)                              AS total_trades,
-                SUM(CAST(pnl_usdc AS REAL))           AS total_pnl,
-                SUM(CASE WHEN CAST(pnl_usdc AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN CAST(pnl_usdc AS REAL) <= 0 THEN 1 ELSE 0 END) AS losses,
-                AVG(CAST(pnl_usdc AS REAL))           AS avg_pnl
-            FROM positions WHERE status = 'closed'
+                COUNT(*)                                        AS total_trades,
+                SUM(CAST(usdc_amount AS REAL))                  AS total_pnl,
+                SUM(CASE WHEN CAST(usdc_amount AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN CAST(usdc_amount AS REAL) <= 0 THEN 1 ELSE 0 END) AS losses,
+                AVG(CAST(usdc_amount AS REAL))                  AS avg_pnl
+            FROM trades WHERE action IN ('exit', 'sell')
         """).fetchone()
         d = dict(row)
         total = d["total_trades"] or 0

@@ -10,7 +10,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
 import aiohttp
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from src.api.clob_client import ClobClient
@@ -118,9 +118,11 @@ async def _force_exit_check(
     breaker,
     current_prices: dict,
     session: aiohttp.ClientSession,
-) -> None:
+) -> set[str]:
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
+
+    closed: set[str] = set()
 
     for pos in get_open_positions():
         try:
@@ -169,6 +171,7 @@ async def _force_exit_check(
 
         manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, "force_exit_expiry")
         breaker.record_trade(float(pnl))
+        closed.add(cid)
 
         alert = get_alert()
         if alert:
@@ -181,6 +184,8 @@ async def _force_exit_check(
                 reason      = "force_exit_expiry",
                 session     = session,
             )
+
+    return closed
 
 async def _get_base_rates(
     market: dict, builder, session: aiohttp.ClientSession,
@@ -245,12 +250,17 @@ async def _get_base_rates(
 
 async def _analyze_market(
     market, clob, gamma, detector, sizer, manager,
-    builder, breaker, capital, session, vol_data: dict | None = None
+    builder, breaker, capital, session, vol_data: dict | None = None,
+    closed_this_cycle: set | None = None,
 ):
     from src.logic.pricing import ke_decimal
 
     condition_id = market.get("conditionId", market.get("id", ""))
     question     = market.get("question", market.get("title", ""))
+
+    if closed_this_cycle and condition_id in closed_this_cycle:
+        logger.debug(f"Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
     prices       = gamma.get_token_prices(market)
     yes_price    = prices.get("Yes")
 
@@ -305,7 +315,7 @@ async def _analyze_market(
         if buy_price <= 0 or buy_price >= 1:
             continue
 
-        min_wr = getattr(config, "HOURLY_MIN_WINRATE_STRICT", 0.75)
+        min_wr = config.HOURLY_MIN_WINRATE_STRICT
         if buy_winrate < min_wr:
             logger.debug(f"Skip {question[:40]} | winrate {buy_winrate:.2f} < {min_wr:.2f}")
             continue
@@ -417,6 +427,7 @@ async def _analyze_market(
                 ev       = float(kelly.expected_value),
                 session  = session,
                 dry_run  = config.DRY_RUN,
+                strategy = "Daily Crypto",
             )
 
 async def _dry_run_open(result, kelly, market, manager, buy_outcome: str, buy_price: float, token_id: str = ""):
@@ -567,13 +578,14 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
     else:
         log.info(f"[RECONCILE] Selesai — semua {len(positions)} posisi masih aktif")
 
-async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.ClientSession) -> None:
+async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.ClientSession) -> set[str]:
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
     now       = datetime.now(timezone.utc)
     positions = get_open_positions()
     expired   = []
+    closed: set[str] = set()
 
     for pos in positions:
         try:
@@ -586,7 +598,7 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
             continue
 
     if not expired:
-        return
+        return closed
 
     log.info(f"[RESOLVE CHECK] {len(expired)} posisi sudah melewati resolve_date")
 
@@ -644,6 +656,7 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
 
         manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, reason)
         breaker.record_trade(float(pnl))
+        closed.add(cid)
 
         log.info(
             f"[RESOLVE CHECK] {'✅ WIN' if won else '❌ LOSE'} — "
@@ -661,6 +674,8 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
                 reason      = reason,
                 session     = session,
             )
+
+    return closed
 
 async def _fetch_current_prices(clob, manager) -> dict:
     from src.models.database import get_open_positions
@@ -693,10 +708,12 @@ _UPDOWN_SERIES = {
 }
 
 _UPDOWN_HOURLY_SLUG_PREFIXES = {
-    "BTC": "bitcoin-up-or-down-",
-    "ETH": "ethereum-up-or-down-",
-    "SOL": "solana-up-or-down-",
-    "XRP": "xrp-up-or-down-",
+    "BTC":  "bitcoin-up-or-down-",
+    "ETH":  "ethereum-up-or-down-",
+    "SOL":  "solana-up-or-down-",
+    "XRP":  "xrp-up-or-down-",
+    "DOGE": "dogecoin-up-or-down-",
+    "BNB":  "bnb-up-or-down-",
 }
 _UPDOWN_HOURLY_SKIP_MARKERS = ("-5m-", "-15m-", "-4h-", "updown-5m", "updown-15m", "updown-4h")
 
@@ -752,6 +769,7 @@ async def _analyze_updown_market(
     market: dict, clob, gamma, sizer, manager,
     breaker, capital: float, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
+    closed_this_cycle: set | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability
@@ -762,6 +780,10 @@ async def _analyze_updown_market(
         return
 
     condition_id = market.get("conditionId", market.get("id", ""))
+
+    if closed_this_cycle and condition_id in closed_this_cycle:
+        logger.debug(f"[UPDOWN] Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
     question     = market.get("question", market.get("title", f"{symbol} Up or Down Daily"))
 
     outcomes = market.get("outcomes", [])
@@ -795,12 +817,17 @@ async def _analyze_updown_market(
         return
 
     delta_sec = (end_date - datetime.now(timezone.utc)).total_seconds()
+    max_hours = getattr(config, "UPDOWN_MAX_HOURS", 8.0)
+    if delta_sec > max_hours * 3600:
+        logger.debug(f"[UPDOWN] {symbol} {delta_sec/3600:.1f}h left > {max_hours}h max — terlalu awal, skip")
+        return
+
     prob_up = await calculate_updown_probability(symbol, session, vol_data or {}, end_date)
     if prob_up is None:
         return
 
     edge      = prob_up - market_price_up
-    threshold = getattr(config, "UPDOWN_THRESHOLD", 0.05)
+    threshold = config.UPDOWN_THRESHOLD
 
     if abs(edge) < threshold:
         logger.debug(f"[UPDOWN] {symbol} edge={edge:+.3f} < {threshold:.2f} — skip")
@@ -818,7 +845,7 @@ async def _analyze_updown_market(
     if buy_price <= 0 or buy_price >= 1:
         return
 
-    min_wr = getattr(config, "HOURLY_MIN_WINRATE_STRICT", 0.75)
+    min_wr = getattr(config, "UPDOWN_MIN_WINRATE", 0.55)
     if buy_winrate < min_wr:
         logger.debug(f"[UPDOWN] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
         return
@@ -930,21 +957,42 @@ async def _analyze_updown_market(
                     "resolve_date":   resolve_date.isoformat(),
                 })
 
+        alert = get_alert()
+        if alert:
+            await alert.alert_signal(
+                question = question,
+                outcome  = buy_outcome,
+                price    = buy_price,
+                bet_usdc = float(kelly.bet_usdc),
+                gap_pct  = abs(edge) * 100,
+                ev       = float(kelly.expected_value),
+                session  = session,
+                dry_run  = config.DRY_RUN,
+                strategy = "Up/Down Daily",
+            )
+
 async def _scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
     import json as _json
 
     results = []
     now     = datetime.now(timezone.utc)
 
+    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
+    max_min = getattr(config, "UPDOWN_HOURLY_MAX_MINUTES", 90)
+    end_min = (now + timedelta(minutes=min_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_max = (now + timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     try:
         batch = await gamma._aget(
             "/events",
             session,
             params={
-                "closed":    "false",
-                "limit":     100,
-                "order":     "endDate",
-                "ascending": "true",
+                "closed":       "false",
+                "limit":        200,
+                "order":        "endDate",
+                "ascending":    "true",
+                "end_date_min": end_min,
+                "end_date_max": end_max,
             },
         )
     except Exception as e:
@@ -953,9 +1001,6 @@ async def _scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: Gam
 
     if not isinstance(batch, list):
         return results
-
-    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
-    max_min = getattr(config, "HOURLY_MAX_MINUTES_TO_RESOLVE", 90)
 
     for event in batch:
         slug = (event.get("slug") or "").lower()
@@ -1012,6 +1057,7 @@ async def _analyze_updown_hourly_market(
     market: dict, clob, gamma, sizer, manager,
     breaker, capital: float, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
+    closed_this_cycle: set | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability_hourly
@@ -1022,6 +1068,10 @@ async def _analyze_updown_hourly_market(
         return
 
     condition_id = market.get("conditionId", market.get("id", ""))
+
+    if closed_this_cycle and condition_id in closed_this_cycle:
+        logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} — closed this cycle, no re-entry")
+        return
     question     = market.get("question", market.get("title", f"{symbol} Up or Down Hourly"))
 
     outcomes = market.get("outcomes", [])
@@ -1064,7 +1114,7 @@ async def _analyze_updown_hourly_market(
         return
 
     edge      = prob_up - market_price_up
-    threshold = getattr(config, "UPDOWN_HOURLY_THRESHOLD", getattr(config, "UPDOWN_THRESHOLD", 0.05))
+    threshold = config.UPDOWN_HOURLY_THRESHOLD
 
     if abs(edge) < threshold:
         logger.debug(f"[UPDOWN HOURLY] {symbol} edge={edge:+.3f} < {threshold:.2f} — skip")
@@ -1082,7 +1132,7 @@ async def _analyze_updown_hourly_market(
     if buy_price <= 0 or buy_price >= 1:
         return
 
-    min_wr = getattr(config, "HOURLY_MIN_WINRATE_STRICT", 0.75)
+    min_wr = getattr(config, "UPDOWN_HOURLY_MIN_WINRATE", 0.55)
     if buy_winrate < min_wr:
         logger.debug(f"[UPDOWN HOURLY] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
         return
@@ -1194,6 +1244,20 @@ async def _analyze_updown_hourly_market(
                     "resolve_date":   resolve_date.isoformat(),
                 })
 
+        alert = get_alert()
+        if alert:
+            await alert.alert_signal(
+                question = question,
+                outcome  = buy_outcome,
+                price    = buy_price,
+                bet_usdc = float(kelly.bet_usdc),
+                gap_pct  = abs(edge) * 100,
+                ev       = float(kelly.expected_value),
+                session  = session,
+                dry_run  = config.DRY_RUN,
+                strategy = "Up/Down Hourly",
+            )
+
 async def run_mispricing_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     detector = MispricingDetector(threshold=getattr(config, "HOURLY_MISPRICING_THRESHOLD", 0.12))
@@ -1239,7 +1303,8 @@ async def run_mispricing_mode(clob: ClobClient):
         while True:
             try:
                 await _backfill_missing_token_ids(gamma, session)
-                await _resolve_checker(clob, gamma, manager, breaker, session)
+                closed_this_cycle: set[str] = set()
+                closed_this_cycle |= await _resolve_checker(clob, gamma, manager, breaker, session)
 
                 if config.DRY_RUN:
                     from src.models.database import get_open_positions as _get_open
@@ -1274,8 +1339,9 @@ async def run_mispricing_mode(clob: ClobClient):
                     manager.exit_evaluator.trailing_stop_pct = Decimal(str(new_stop))
                     logger.debug(f"[STOP] trailing_stop={new_stop:.1%} avg_P={avg_P:.2f}")
 
-                await _force_exit_check(clob, manager, breaker, current_prices, session)
+                closed_this_cycle |= await _force_exit_check(clob, manager, breaker, current_prices, session)
                 exits = manager.evaluate_exits(current_prices)
+                closed_this_cycle |= {d.position.condition_id for d in exits}
                 for decision in exits:
                     pos = decision.position
 
@@ -1353,7 +1419,8 @@ async def run_mispricing_mode(clob: ClobClient):
                     results = await asyncio.gather(*[
                         _analyze_market(
                             market, clob, gamma, detector, sizer, manager,
-                            builder, breaker, capital, session, vol_data=vol_data
+                            builder, breaker, capital, session, vol_data=vol_data,
+                            closed_this_cycle=closed_this_cycle,
                         )
                         for market in markets
                     ], return_exceptions=True)
@@ -1369,6 +1436,7 @@ async def run_mispricing_mode(clob: ClobClient):
                             await _analyze_updown_market(
                                 ud_mkt, clob, gamma, sizer, manager,
                                 breaker, capital, session, vol_data=vol_data,
+                                closed_this_cycle=closed_this_cycle,
                             )
                         except Exception as e:
                             logger.warning(f"[UPDOWN DAILY] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
@@ -1381,6 +1449,7 @@ async def run_mispricing_mode(clob: ClobClient):
                             await _analyze_updown_hourly_market(
                                 hm, clob, gamma, sizer, manager,
                                 breaker, capital, session, vol_data=vol_data,
+                                closed_this_cycle=closed_this_cycle,
                             )
                         except Exception as e:
                             logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")

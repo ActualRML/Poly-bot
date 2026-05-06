@@ -26,6 +26,7 @@ class Position:
     entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     question: str = ""
     token_id: str = ""
+    strategy_mode: str = ""
 
     @property
     def days_to_resolve(self) -> int:
@@ -90,6 +91,15 @@ class ExitEvaluator:
         self.stale_movement_threshold = ke_decimal(stale_movement_threshold)
 
     def evaluate(self, pos: Position) -> ExitDecision:
+        if pos.strategy_mode in ("updown_hourly", "updown_hourly_dry_run"):
+            return ExitDecision(
+                signal=ExitSignal.HOLD,
+                should_exit=False,
+                position=pos,
+                estimated_pnl_usdc=self._calc_pnl(pos),
+                reason="Hold to resolve — hourly binary market, no trailing stop",
+            )
+
         if pos.current_price >= self.profit_threshold:
 
             if pos.days_to_resolve <= self.days_hold_to_resolve:

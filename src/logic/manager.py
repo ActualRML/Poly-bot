@@ -197,6 +197,7 @@ class PositionManager:
             resolve_date=resolve_date,
             entry_time=entry_time,
             token_id=row.get("token_id") or "",
+            strategy_mode=row.get("strategy_mode") or "",
         )
 
     def _process_exit_manual(

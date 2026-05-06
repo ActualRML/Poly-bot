@@ -60,6 +60,13 @@ class Config:
     HOURLY_VOL_HOURS              : int   = _get_int("HOURLY_VOL_HOURS", 24)
     HOURLY_DRIFT_HOURS            : int   = _get_int("HOURLY_DRIFT_HOURS", 4)
 
+    UPDOWN_MIN_WINRATE          : float = _get_float("UPDOWN_MIN_WINRATE", 0.55)
+    UPDOWN_HOURLY_MIN_WINRATE   : float = _get_float("UPDOWN_HOURLY_MIN_WINRATE", 0.55)
+    UPDOWN_THRESHOLD            : float = _get_float("UPDOWN_THRESHOLD", 0.05)
+    UPDOWN_HOURLY_THRESHOLD     : float = _get_float("UPDOWN_HOURLY_THRESHOLD", 0.05)
+    UPDOWN_MAX_HOURS            : float = _get_float("UPDOWN_MAX_HOURS", 8.0)
+    UPDOWN_HOURLY_MAX_MINUTES   : int   = _get_int("UPDOWN_HOURLY_MAX_MINUTES", 90)
+
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
     POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")

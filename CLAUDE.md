@@ -1,10 +1,10 @@
 # Polymarket Trading Bot
 
 Bot trading untuk Polymarket prediction market.
-**Dua strategy aktif: Crypto Daily + Up/Down Daily. Up/Down Hourly dikerjakan terpisah.**
+**Tiga strategy aktif: Crypto Daily + Up/Down Daily + Up/Down Hourly.**
 
 ## Struktur
-- `src/main.py` → entry point + main loop async (kedua strategy jalan di sini)
+- `src/main.py` → entry point + main loop async (semua strategy jalan di sini)
 - `src/logic/` → strategy, probability, kelly, risk_manager, circuit_breaker, exit_strategy, mispricing, manager, updown_strategy
 - `src/api/` → Polymarket CLOB, Gamma, Binance clients
 - `src/utils/` → config, logger, telegram_alert
@@ -17,7 +17,7 @@ Bot trading untuk Polymarket prediction market.
 
 ## Config
 Dua file env (gitignored):
-- `.env.secret` → credentials (PK, CLOB_*, FRED, Telegram tokens)
+- `.env.secret` → credentials (PK, CLOB_*, Telegram tokens)
 - `.env.local`  → strategy params (Kelly, risk, threshold, dll)
 - `.env.example` → template referensi (committed, aman)
 
@@ -98,18 +98,11 @@ threshold = vol_annual / sqrt(24) * 1.5   →  clamped [6%, 25%]
 ### Status: **LIVE — paper trade aktif di `main.py`**
 
 Market "Bitcoin Up or Down on May 4?" — resolve sekali sehari jam 16:00 UTC.
-Berjalan berbarengan dengan Daily strategy dalam satu loop.
+Berjalan berbarengan dengan strategy lain dalam satu loop.
 
 ### File
 - `src/logic/updown_strategy.py` — `calculate_updown_probability()`, `fetch_reference_price()`
 - `script/backtest_updown.py` — backtest historis via Gamma series endpoint
-
-### Tipe Market Up/Down di Polymarket
-| Tipe | Contoh | Reference | Source | Status |
-|---|---|---|---|---|
-| **Daily** | "Bitcoin Up or Down on May 3?" | Binance 1-min close 16:00 UTC kemarin | Binance | ✅ Live |
-| **Hourly** | "Bitcoin Up or Down - May 3, 1PM ET" | Open 1h Binance candle saat itu | Binance | 🔧 TODO |
-| Chainlink | "Bitcoin Up or Down - May 3, 4:30PM-4:35PM ET" | Harga 5/15-min window | Chainlink | ⏭ skip |
 
 ### Series IDs Gamma (untuk `/events?series_id=X`)
 | Asset | Series ID | Ticker |
@@ -130,7 +123,7 @@ Log-normal at-expiry: `P(S_T >= reference) = Φ(d2)`, drift=0 risk-neutral.
 Implementasi di `src/logic/updown_strategy.py:calculate_updown_probability()`.
 
 Signal kuat saat T = 2–8 jam dan harga sudah jauh bergerak dari reference.
-Saat baru buka (T ~22 jam), model ≈ 0.5 → edge kecil → normal tidak ada signal.
+**Skip entry kalau `time_left > UPDOWN_MAX_HOURS` (default 8h)** — signal di T > 8h terlalu noise.
 
 ### Hasil Backtest (90 hari, n=44 per asset)
 Entry simulasi: 90 menit sebelum expiry.
@@ -145,28 +138,65 @@ Entry simulasi: 90 menit sebelum expiry.
 MAE ~43% normal untuk near-50/50 market — gunakan Accuracy sebagai metrik.
 
 ### Config
-- `UPDOWN_THRESHOLD` (default 0.05) — min edge 5% di `.env.local`
+- `UPDOWN_THRESHOLD` (default 0.05) — min edge 5%
+- `UPDOWN_MAX_HOURS` (default 8.0) — skip entry kalau expiry > 8 jam lagi
 - `strategy_mode` DB: `updown_dry_run` (paper) / `updown` (live)
 
 ---
 
-## Strategy 3: Up/Down Hourly — TODO (dikerjakan terpisah)
+## Strategy 3: Up/Down Hourly
 
-**Owner: teman**
+### Status: **LIVE — paper trade aktif di `main.py`**
 
-Market "Bitcoin Up or Down - May 4, 1PM ET" — resolve setiap jam.
+Market "Bitcoin Up or Down - May 6, 1AM ET" — resolve setiap jam.
+Berjalan berbarengan dengan strategy lain dalam satu loop.
 
-### Yang perlu dikerjakan:
-1. **Reference price** — open 1h Binance candle saat market buka (beda dari Daily yang pakai 16:00 UTC kemarin)
-2. **Backtest** — script baru atau extend `script/backtest_updown.py` dengan flag `--type hourly`
-3. **Series IDs** untuk Hourly belum diketahui — perlu dicari di Gamma
-4. **Integrasi ke `main.py`** — tambah `_scan_updown_hourly_markets()` dan `_analyze_updown_hourly_market()` (ikuti pola Daily)
-5. **Threshold** — kemungkinan butuh nilai berbeda dari Daily karena T lebih pendek
+### File
+- `src/logic/updown_strategy.py` — `calculate_updown_probability_hourly()`, `fetch_reference_price_hourly()`
+- `src/main.py` — `_scan_updown_hourly_markets()`, `_analyze_updown_hourly_market()`
 
-### Catatan arsitektur:
-- Hourly Up/Down markets bisa masuk time window `ascan_hourly_opportunities` (5–90 menit), tapi reference price-nya beda → **jangan reuse** `_get_base_rates()`
-- Buat fungsi scan tersendiri seperti Daily, jangan tercampur dengan Crypto Daily scanner
-- `strategy_mode` DB: gunakan `updown_hourly_dry_run` / `updown_hourly`
+### Slug Format Gamma
+Format: `{asset}-up-or-down-{month}-{day}-{year}-{hour}am/pm-et`
+
+Contoh: `bitcoin-up-or-down-may-6-2026-1am-et`
+
+**Asset aktif: BTC, ETH, SOL, XRP, DOGE, BNB** (HYPE diexclude — tidak ada di Binance)
+
+### Scan Logic
+Query `/events` dengan filter `end_date_min`/`end_date_max` (window: 5–`UPDOWN_HOURLY_MAX_MINUTES` menit).
+**Penting:** tanpa date filter, Gamma mengembalikan ribuan 5m markets pre-created yang menutupi hourly markets.
+
+5m markets (`btc-updown-5m-...`) dan 15m markets (`btc-updown-15m-...`) di-skip via `_UPDOWN_HOURLY_SKIP_MARKERS`.
+
+### Reference Price
+`fetch_reference_price_hourly()` → open 1h Binance candle di `market_start_date` (bukan 16:00 UTC kemarin seperti Daily).
+
+### Probability Model
+Log-normal at-expiry identik dengan Daily, tapi T dalam hitungan menit bukan jam.
+Implementasi di `src/logic/updown_strategy.py:calculate_updown_probability_hourly()`.
+
+### Hasil Backtest (30 hari, entry T-30m, n=719 per asset)
+`python -m script.backtest_updown_hourly --days 30 --entry_min 30`
+
+| Asset | Accuracy | Bias | n |
+|---|---|---|---|
+| BTC | **75.1%** | -0.033 (under-conf) | 719 |
+| ETH | **74.4%** | -0.025 (OK) | 719 |
+| SOL | **74.8%** | -0.015 (OK) | 719 |
+| XRP | **73.0%** | -0.020 (OK) | 719 |
+| DOGE | **72.9%** | -0.020 (OK) | 719 |
+| BNB | **76.6%** | -0.018 (OK) | 719 |
+
+**Distribusi edge (semua asset, 4314 candles):**
+- Edge ≥ 5% → hanya **14% candles**, accuracy **90.3%** ← signal yang valid
+- Edge ≥ 10% → hanya **1% candles**, accuracy **85%**
+
+**Kesimpulan:** Ada edge nyata tapi sangat selektif. Model benar 90% saat yakin (edge ≥ 5%), tapi mayoritas waktu model bilang ~50% → tidak ada signal → **benar tidak entry**. `UPDOWN_HOURLY_THRESHOLD=0.05` sudah tepat.
+
+### Config
+- `UPDOWN_HOURLY_THRESHOLD` (default 0.05) — min edge 5%
+- `UPDOWN_HOURLY_MAX_MINUTES` (default 90) — window scan, **terpisah** dari `HOURLY_MAX_MINUTES_TO_RESOLVE` milik Daily Crypto (1440)
+- `strategy_mode` DB: `updown_hourly_dry_run` (paper) / `updown_hourly` (live)
 
 ---
 
@@ -226,8 +256,9 @@ EXIT BLOCK — selalu jalan, tidak diblokir CB:
 ENTRY BLOCK — hanya kalau CB & safety OK:
   9. CB check → continue kalau triggered
   10. _prefetch_prices (cache crypto prices)
-  11. ascan_hourly_opportunities → _analyze_market × N  [Daily strategy]
-  12. _scan_updown_markets → _analyze_updown_market × 4  [Up/Down Daily]
+  11. ascan_hourly_opportunities → _analyze_market × N      [Daily Crypto]
+  12. _scan_updown_markets → _analyze_updown_market × 4     [Up/Down Daily]
+  13. _scan_updown_hourly_markets → _analyze_updown_hourly_market × N  [Up/Down Hourly]
 ```
 
 **Startup (sekali sebelum loop):**
@@ -250,15 +281,6 @@ ENTRY BLOCK — hanya kalau CB & safety OK:
 
 **Status: AKTIF** — `DRY_RUN=True`, modal virtual $120.
 
-Log per cycle:
-```
-Daily crypto + Up/Down Daily strategy aktif (async).
-[VOL] BTC 57% | ETH 68% | SOL 60% | BNB 60% (annualized)
-Daily scan: 36 market lolos filter
-[UPDOWN] 4 active Up/Down Daily markets
-[UPDOWN] BTC 6.2h left | BUY Up @ 0.420 | P(Up)=0.631 Mkt=0.420 Edge=+0.211 | Kelly $10.00
-```
-
 **Stop criteria:**
 - Winrate < 55% setelah 20+ trade → naikkan threshold
 - ROI < -5% setelah 10+ trade → review config
@@ -267,12 +289,43 @@ Daily scan: 36 market lolos filter
 
 ## Next Steps
 
-| Priority | Task | Owner |
+| Priority | Task |
+|---|---|
+| 🔴 | Kumpulkan 20+ trade paper per strategy, cek winrate & ROI |
+| 🟡 | Setup cron recalibrate di VPS |
+| 🟢 | Go live setelah paper trade terbukti edge |
+
+---
+
+## Test Coverage
+
+**Run semua tests:**
+```bash
+pytest tests/ -v
+pytest tests/ -q --tb=short
+```
+
+### Sudah ditest (233 tests) — semua passing, 0 warnings
+
+| File | Test File | Keterangan |
 |---|---|---|
-| 🔴 | Kumpulkan 20+ trade paper, cek winrate & ROI | Monitor |
-| 🟡 | Setup cron recalibrate di VPS | - |
-| 🟡 | Up/Down Hourly — backtest + integrasi | Teman |
-| 🟢 | Go live setelah paper trade terbukti edge | - |
+| `src/logic/kelly.py` | `tests/test_kelly.py` | Hypothesis — bet bounds, EV check |
+| `src/logic/risk_manager.py` | `tests/test_risk_manager.py` | Hypothesis — stop loss [5%,45%], sizing [$10,$30] |
+| `src/logic/probability.py` | `tests/test_probability.py` | Hypothesis — norm_cdf, barrier, expiry |
+| `src/logic/exit_strategy.py` | `tests/test_exit_strategy.py` | Hypothesis — tidak crash, signal valid |
+| `src/logic/mispricing.py` | `tests/test_mispricing.py` | Hypothesis — blend, direction, invert |
+| `src/logic/circuit_breaker.py` | `tests/test_circuit_breaker.py` | Saklar 1/2/3, safety thresholds |
+| `src/logic/pricing.py` | `tests/test_pricing.py` | Hypothesis — tick bounds, PnL sign |
+| `src/logic/updown_strategy.py` | `tests/test_updown_strategy.py` | norm_cdf symmetry, monotone; `detect_updown_market` semua symbol + edge cases |
+| `src/logic/strategy.py` | `tests/test_strategy.py` | `get_dynamic_threshold` clamp [6%,25%]; `should_force_exit` timezone |
+| `src/api/binance_client.py` | `tests/test_async_binance.py` | Concurrent lock, rate limit, partial failure |
+| `src/api/gamma_client.py` | `tests/test_gamma_filter.py` | `_filter_markets` skip logic; `get_token_prices`; `extract_token_ids` |
+| `src/api/clob_client.py` | `tests/test_clob_client.py` | DRY_RUN path; `get_balance` fallback; `ambil_snapshot` parse |
+| `src/models/database.py` | `tests/test_database.py` | Temp SQLite; UPSERT; migration; PnL aggregate |
+| `src/logic/manager.py` | `tests/test_manager.py` | `can_open` limits; `_row_to_position` datetime; `get_unrealized_pnl` |
+| `src/utils/config.py` | `tests/test_config.py` | `_get_bool` variants; `_get_float/_int/_decimal` |
+
+`tests/conftest.py` — `gc.collect()` autouse fixture (cegah ResourceWarning sqlite3 di Python 3.12+)
 
 ---
 
