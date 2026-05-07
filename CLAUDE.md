@@ -31,7 +31,8 @@ Endpoint defaults sudah ada di `config.py`. **Jangan commit env files.**
 
 ## Strategy 1: Crypto Daily
 
-Market "Will BTC be above $X?" yang resolve dalam 5–90 menit ke depan.
+Market "Will BTC be above $X?" yang resolve dalam 5 menit – 24 jam ke depan (`HOURLY_MAX_MINUTES_TO_RESOLVE=1440`).
+Bot scalping via `MIN_PROFIT_PCT=0.20` — masuk hanya kalau upside ≥ 20%, exit via profit lock di tengah.
 
 ### Probability Model (`src/logic/probability.py`)
 - Log-normal + barrier crossing model
@@ -68,7 +69,7 @@ threshold = vol_annual / sqrt(24) * 1.5   →  clamped [6%, 25%]
 1. Status — skip `closed/active=false/archived/resolved`
 2. Order book — skip `enableOrderBook=false`
 3. Kategori — skip sports/entertainment/music/awards/tv/movies/gaming
-4. Volume — skip < `HOURLY_MIN_MARKET_VOLUME` ($500)
+4. Volume — skip < `HOURLY_MIN_MARKET_VOLUME` ($5000)
 5. Liquidity — skip < `HOURLY_MIN_LIQUIDITY` ($200)
 6. Time window — skip di luar `[HOURLY_MIN_MINUTES_TO_RESOLVE, HOURLY_MAX_MINUTES_TO_RESOLVE]`
 
@@ -141,11 +142,13 @@ Query `/events` dengan filter `end_date_min`/`end_date_max` (window: 5–`UPDOWN
 | DOGE | **72.9%** | -0.020 |
 | BNB | **76.6%** | -0.018 |
 
-Edge ≥ 5% → hanya **14% candles**, accuracy **90.3%** — signal yang valid.
+Edge ≥ 5% → hanya **14% candles**, accuracy **90.3%** dalam backtest. **Paper trade actual** (n=25): edge bukan predictor reliable (avg edge wins 13.6% ≈ avg edge losses 13.6%) — filter momentum dan trailing diperlukan.
 
 ### Config
-- `UPDOWN_HOURLY_THRESHOLD` (default 0.05) — min edge 5%
-- `UPDOWN_HOURLY_MAX_MINUTES` (default 90) — window scan
+- `UPDOWN_HOURLY_THRESHOLD=0.07` — min edge 7% (naik dari 0.05 setelah audit)
+- `UPDOWN_HOURLY_MAX_MINUTES=90` — window scan
+- `UPDOWN_HOURLY_MAX_ENTRY_PRICE=0.65` — skip entry kalau buy_price > 0.65 (upside terlalu tipis)
+- `UPDOWN_HOURLY_MOMENTUM_MINUTES=15`, `UPDOWN_HOURLY_MOMENTUM_THRESHOLD=0.003` — skip Up signal kalau asset turun >0.3% in 15m
 - `strategy_mode` DB: `updown_hourly_dry_run` (paper) / `updown_hourly` (live)
 
 ---
@@ -158,10 +161,11 @@ Edge ≥ 5% → hanya **14% candles**, accuracy **90.3%** — signal yang valid.
 |---|---|---|
 | Daily Crypto | PnL ≥ 20% & > 60m left | PnL ≥ 35% & > 30m left |
 | Up/Down Daily | PnL ≥ 40% & > 60m left | PnL ≥ 60% & > 30m left |
-| Up/Down Hourly | PnL ≥ 60% & > 30m left | PnL ≥ 60% & > 20m left |
+| Up/Down Hourly | PnL ≥ 30% & > 30m left | PnL ≥ 50% & > 20m left |
+| Up/Down Hourly trailing | Peak PnL ≥ 15% + retrace ≥ 30% from peak (sisa > 10m) | — |
 | Near-expiry (≤ 20m) | Hold to resolve | — |
 
-Config: `PROFIT_LOCK_PCT`, `PROFIT_LOCK_HIGH_PCT`, `UPDOWN_PROFIT_LOCK_PCT`, `UPDOWN_PROFIT_LOCK_HIGH_PCT`, `HOURLY_PROFIT_LOCK_PCT`, `HOURLY_PROFIT_LOCK_HIGH_PCT`
+Config: `PROFIT_LOCK_PCT`, `PROFIT_LOCK_HIGH_PCT`, `UPDOWN_PROFIT_LOCK_PCT`, `UPDOWN_PROFIT_LOCK_HIGH_PCT`, `HOURLY_PROFIT_LOCK_PCT`, `HOURLY_PROFIT_LOCK_HIGH_PCT`, `HOURLY_TRAILING_ACTIVATE_PCT`, `HOURLY_TRAILING_RETRACE_PCT`
 
 ### No Re-entry Setelah Profit Lock
 `_profit_locked_markets` — set session-level di `main.py`. Market yang sudah di-profit-lock tidak akan di-enter lagi sampai bot di-restart.
@@ -181,17 +185,18 @@ Update setiap cycle berdasarkan rata-rata harga posisi open dan BTC vol.
 - 3+ consecutive wins → cap **$30**
 - Default → **$20**
 
-**Direction cap:** `MAX_SAME_DIRECTION` (default 0 = off) — batasi posisi Up/Down bersamaan.
-Set 0 untuk paper trade (kompound lebih cepat), pertimbangkan aktifkan saat go live.
+**Direction cap:** `MAX_SAME_DIRECTION=2` — max 2 posisi searah (Up atau Down) bersamaan.
+
+**Slot cap:** `MAX_POSITIONS_PER_SLOT=2` — max 2 posisi yang resolve di slot waktu yang sama (±30 menit). Cegah correlation risk ketika multiple asset resolve bareng.
 
 ---
 
 ## Circuit Breaker (`src/logic/circuit_breaker.py`)
 
 **PnL-based** (`check()`):
-- Saklar 1: daily loss > 10% modal → pause sampai besok (auto reset)
-- Saklar 2: 3x consecutive loss → pause (**manual reset**)
-- Saklar 3: drawdown > 20% → emergency stop (**manual reset**)
+- Saklar 1: daily loss > 20% modal (`MAX_DAILY_LOSS_PCT`) → pause sampai besok (auto reset)
+- Saklar 2: 5x consecutive loss (`MAX_CONSECUTIVE_LOSSES`) → pause (**manual reset**)
+- Saklar 3: drawdown > 20% (`MAX_DRAWDOWN_PCT`) → emergency stop (**manual reset**)
 
 **Market-condition** (`check_safety_thresholds()`):
 - BTC realized vol > 100% annualized → halt entry baru
@@ -254,11 +259,25 @@ Balance dry run = `SALDO_AWAL + realized_pnl - locked_capital` → profit ikut c
 
 ---
 
+## Audit Hourly (2026-05-07) — semua done
+
+Audit dari 25 trade paper menemukan: edge bukan predictor reliable (avg edge wins 13.6% ≈ losses 13.6%) dan bot tidak panen profit di tengah (15/17 wins tunggu resolve). Solusi yang sudah implementasi:
+
+1. ✅ Turunkan profit lock hourly 60→30 / 60→50
+2. ✅ Momentum filter — skip Up signal kalau asset turun >0.3% in 15m
+3. ✅ Threshold edge naik 0.05→0.07
+4. ✅ Max entry price hourly 0.65 (skip kalau upside < 35%)
+5. ✅ Trailing profit lock — activate peak PnL ≥15%, exit kalau retrace ≥30%
+
+Validasi: butuh 20-30 trade baru untuk konfirmasi target winrate ≥75%.
+
+---
+
 ## Next Steps
 
 | Priority | Task |
 |---|---|
-| 🔴 | Kumpulkan 20+ trade paper per strategy, cek winrate & ROI |
+| 🔴 | Pantau 20-30 trade hourly post-audit, validasi winrate naik dan exit_lock_profit dominan |
 | 🟡 | Setup cron recalibrate di VPS |
 | 🟢 | Go live setelah paper trade terbukti edge |
 
@@ -271,7 +290,7 @@ Balance dry run = `SALDO_AWAL + realized_pnl - locked_capital` → profit ikut c
 pytest tests/ -q --tb=short
 ```
 
-### 244 tests — semua passing, 0 warnings
+### 260 tests — semua passing, 0 warnings
 
 | File | Test File |
 |---|---|

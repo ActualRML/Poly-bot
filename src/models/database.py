@@ -257,6 +257,16 @@ def count_open_by_direction(outcome: str) -> int:
             (outcome,)
         ).fetchone()[0]
 
+def count_open_by_resolve_slot(resolve_dt: datetime, window_minutes: int = 30) -> int:
+    from datetime import timedelta
+    lo = (resolve_dt - timedelta(minutes=window_minutes)).isoformat()
+    hi = (resolve_dt + timedelta(minutes=window_minutes)).isoformat()
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE status = 'open' AND resolve_date BETWEEN ? AND ?",
+            (lo, hi)
+        ).fetchone()[0]
+
 def log_trade(trade: dict):
 
     sql = """

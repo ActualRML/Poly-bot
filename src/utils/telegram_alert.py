@@ -3,7 +3,17 @@ import asyncio
 import aiohttp
 import html
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+def _ts() -> str:
+    now = datetime.now(timezone.utc)
+    wib = now + timedelta(hours=7)
+    return f"{now.strftime('%H:%M UTC')} / {wib.strftime('%H:%M WIB')}"
+
+def _ts_full() -> str:
+    now = datetime.now(timezone.utc)
+    wib = now + timedelta(hours=7)
+    return f"{now.strftime('%Y-%m-%d %H:%M UTC')} / {wib.strftime('%H:%M WIB')}"
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -68,7 +78,7 @@ class TelegramAlert:
             f"💰 Bet      : <b>${bet_usdc:.2f}</b>\n"
             f"📊 Edge     : {gap_pct:.1f}%\n"
             f"⚡ EV       : {ev:.3f}\n\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            f"🕐 {_ts()}"
         )
         await self.send(msg, session)
 
@@ -91,7 +101,7 @@ class TelegramAlert:
             f"📈 Entry    : {entry_price:.3f} → Exit: {exit_price:.3f}\n"
             f"💰 PnL      : <b>${pnl_usdc:+.2f}</b>\n"
             f"📝 Alasan   : {html.escape(reason)}\n\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            f"🕐 {_ts()}"
         )
         await self.send(msg, session)
 
@@ -107,7 +117,7 @@ class TelegramAlert:
             f"⚠️ Bot berhenti trading!\n\n"
             f"📉 Drawdown : {drawdown_pct:.1f}%\n"
             f"📝 Alasan   : {html.escape(reason)}\n\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            f"🕐 {_ts()}"
         )
         await self.send(msg, session)
 
@@ -129,7 +139,7 @@ class TelegramAlert:
             f"✅ Closed    : {closed_trades} trades\n"
             f"{pnl_emoji} Total PnL  : <b>${total_pnl:+.2f}</b>\n"
             f"🎯 Win Rate  : {winrate:.1f}%\n\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+            f"🕐 {_ts_full()}"
         )
         await self.send(msg, session)
 
@@ -142,7 +152,7 @@ class TelegramAlert:
         msg = (
             f"🔴 — <b>BOT ERROR</b>\n\n"
             f"<code>{html.escape(error_msg[:200])}</code>\n\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            f"🕐 {_ts()}"
         )
         await self.send(msg, session)
 

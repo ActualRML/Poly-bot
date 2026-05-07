@@ -92,8 +92,10 @@ class ExitEvaluator:
         profit_lock_high_pct: float = 35.0,
         updown_profit_lock_pct: float = 40.0,
         updown_profit_lock_high_pct: float = 60.0,
-        hourly_profit_lock_pct: float = 60.0,
-        hourly_profit_lock_high_pct: float = 60.0,
+        hourly_profit_lock_pct: float = 30.0,
+        hourly_profit_lock_high_pct: float = 50.0,
+        hourly_trailing_activate_pct: float = 15.0,
+        hourly_trailing_retrace_pct: float = 0.30,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -107,6 +109,8 @@ class ExitEvaluator:
         self.updown_profit_lock_high_pct = updown_profit_lock_high_pct
         self.hourly_profit_lock_pct = hourly_profit_lock_pct
         self.hourly_profit_lock_high_pct = hourly_profit_lock_high_pct
+        self.hourly_trailing_activate_pct = hourly_trailing_activate_pct
+        self.hourly_trailing_retrace_pct = hourly_trailing_retrace_pct
 
     _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
     _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
@@ -130,6 +134,32 @@ class ExitEvaluator:
                         f"{mins:.0f}m tersisa → exit dini"
                     ),
                 )
+
+            if (self.hourly_trailing_activate_pct > 0 and mins > 10
+                    and pos.entry_price > Decimal("0")):
+                peak_pnl_pct = float(
+                    ((pos.highest_price - pos.entry_price) / pos.entry_price * 100
+                     ).quantize(Decimal("0.01"))
+                )
+                if (peak_pnl_pct >= self.hourly_trailing_activate_pct
+                        and peak_pnl_pct > 0
+                        and pnl_pct > 0):
+                    retrace = (peak_pnl_pct - pnl_pct) / peak_pnl_pct
+                    if retrace >= self.hourly_trailing_retrace_pct:
+                        pnl = self._calc_pnl(pos)
+                        return ExitDecision(
+                            signal=ExitSignal.EXIT_LOCK_PROFIT,
+                            should_exit=True,
+                            position=pos,
+                            suggested_exit_price=pos.current_price,
+                            estimated_pnl_usdc=pnl,
+                            reason=(
+                                f"Trailing profit lock! Peak PnL {peak_pnl_pct:+.1f}% → "
+                                f"current {pnl_pct:+.1f}% (retrace {retrace:.0%}) | "
+                                f"{mins:.0f}m tersisa"
+                            ),
+                        )
+
             return ExitDecision(
                 signal=ExitSignal.HOLD,
                 should_exit=False,

@@ -22,7 +22,7 @@ from src.logic.manager import PositionManager
 from src.logic.probability import CryptoProbabilityCalculator
 from src.logic.circuit_breaker import CircuitBreaker
 from src.models.types import SisiOrder
-from src.models.database import log_prediction, get_recent_closed_pnls
+from src.models.database import log_prediction, get_recent_closed_pnls, count_open_by_resolve_slot
 from src.utils.config import config
 from src.utils.logger import log, tampilkan_header
 from src.utils.telegram_alert import init_telegram, get_alert
@@ -1069,7 +1069,7 @@ async def _analyze_updown_hourly_market(
     profit_locked_markets: set | None = None,
 ):
     import json as _json
-    from src.logic.updown_strategy import calculate_updown_probability_hourly
+    from src.logic.updown_strategy import calculate_updown_probability_hourly, calculate_recent_momentum
     from src.logic.pricing import ke_decimal
 
     symbol = market.get("_symbol", "")
@@ -1129,6 +1129,16 @@ async def _analyze_updown_hourly_market(
         )
         return
 
+    max_per_slot = config.MAX_POSITIONS_PER_SLOT
+    if max_per_slot > 0:
+        slot_count = count_open_by_resolve_slot(end_date)
+        if slot_count >= max_per_slot:
+            logger.debug(
+                f"[UPDOWN HOURLY] Skip {symbol} — "
+                f"{slot_count}/{max_per_slot} posisi sudah di slot {end_date.strftime('%H:%M')} UTC"
+            )
+            return
+
     prob_up = await calculate_updown_probability_hourly(
         symbol, session, vol_data or {}, end_date, start_date
     )
@@ -1154,10 +1164,36 @@ async def _analyze_updown_hourly_market(
     if buy_price <= 0 or buy_price >= 1:
         return
 
+    max_entry = config.UPDOWN_HOURLY_MAX_ENTRY_PRICE
+    if max_entry > 0 and buy_price > max_entry:
+        logger.debug(
+            f"[UPDOWN HOURLY] Skip {symbol} {buy_outcome} — "
+            f"buy_price {buy_price:.3f} > max {max_entry:.3f} (upside terlalu tipis)"
+        )
+        return
+
     min_wr = getattr(config, "UPDOWN_HOURLY_MIN_WINRATE", 0.55)
     if buy_winrate < min_wr:
         logger.debug(f"[UPDOWN HOURLY] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
         return
+
+    momentum_min = config.UPDOWN_HOURLY_MOMENTUM_MINUTES
+    momentum_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
+    if momentum_thr > 0:
+        momentum = await calculate_recent_momentum(symbol, session, minutes=momentum_min)
+        if momentum is not None:
+            if buy_outcome == "Up" and momentum < -momentum_thr:
+                logger.info(
+                    f"[UPDOWN HOURLY] Skip {symbol} Up — momentum {momentum:+.2%} "
+                    f"in {momentum_min}m < -{momentum_thr:.1%}"
+                )
+                return
+            if buy_outcome == "Down" and momentum > momentum_thr:
+                logger.info(
+                    f"[UPDOWN HOURLY] Skip {symbol} Down — momentum {momentum:+.2%} "
+                    f"in {momentum_min}m > +{momentum_thr:.1%}"
+                )
+                return
 
     kelly = sizer.calculate(
         winrate      = buy_winrate,
@@ -1303,6 +1339,8 @@ async def run_mispricing_mode(clob: ClobClient):
             updown_profit_lock_high_pct  = getattr(config, "UPDOWN_PROFIT_LOCK_HIGH_PCT", 60.0),
             hourly_profit_lock_pct       = getattr(config, "HOURLY_PROFIT_LOCK_PCT", 60.0),
             hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 60.0),
+            hourly_trailing_activate_pct = getattr(config, "HOURLY_TRAILING_ACTIVATE_PCT", 15.0),
+            hourly_trailing_retrace_pct  = getattr(config, "HOURLY_TRAILING_RETRACE_PCT", 0.30),
         ),
     )
     builder = BaseRateBuilder()
@@ -1342,6 +1380,9 @@ async def run_mispricing_mode(clob: ClobClient):
                     locked        = sum(float(p["capital_at_risk"]) for p in _get_open())
                     realized_pnl  = float(_get_stats().get("total_pnl") or 0)
                     balance       = max(0.0, float(config.SALDO_AWAL) + realized_pnl - locked)
+                    total_capital = float(config.SALDO_AWAL) + realized_pnl
+                    breaker.starting_capital       = total_capital
+                    breaker.state.starting_capital = total_capital
                 else:
                     balance = clob.get_balance()
                 capital = balance

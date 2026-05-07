@@ -113,11 +113,29 @@ def test_updown_hourly_holds_near_expiry(strategy_mode):
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
 def test_updown_hourly_profit_lock_triggers(strategy_mode):
-    # PnL >= 60% dan resolve > 20 menit → EXIT
-    pos = make_hourly_position(strategy_mode, current=0.75, highest=0.75, minutes_left=25)
+    # PnL >= 30% dan resolve > 30 menit → EXIT (low threshold)
+    pos = make_hourly_position(strategy_mode, current=0.60, highest=0.60, minutes_left=35)
     d = evaluator.evaluate(pos)
     assert d.should_exit is True
     assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_profit_lock_high_triggers(strategy_mode):
+    # PnL >= 50% dan resolve > 20 menit → EXIT (high threshold)
+    pos = make_hourly_position(strategy_mode, current=0.70, highest=0.70, minutes_left=25)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_holds_under_low_threshold(strategy_mode):
+    # PnL ~22% < 30% → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.55, highest=0.55, minutes_left=35)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
 
 
 def test_non_hourly_strategy_still_applies_trailing_stop():
@@ -132,3 +150,63 @@ def test_empty_strategy_mode_still_applies_trailing_stop():
     pos = make_hourly_position("", current=0.10, highest=0.45)
     d = evaluator.evaluate(pos)
     assert d.should_exit is True
+
+
+# ── hourly trailing profit lock ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_triggers_on_retrace(strategy_mode):
+    # entry 0.45, peak 0.5625 (PnL +25%), current 0.50625 (PnL +12.5%, retrace 50%) → EXIT
+    pos = make_hourly_position(strategy_mode, current=0.50625, highest=0.5625, minutes_left=35)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
+    assert "Trailing profit lock" in d.reason
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_holds_below_activate_threshold(strategy_mode):
+    # peak PnL +10% < 15% activate → HOLD walau retrace besar
+    pos = make_hourly_position(strategy_mode, current=0.475, highest=0.495, minutes_left=35)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_holds_with_small_retrace(strategy_mode):
+    # peak PnL +25%, current +20% (retrace 20% < 30%) → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.54, highest=0.5625, minutes_left=35)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_disabled_when_activate_zero(strategy_mode):
+    from src.logic.exit_strategy import ExitEvaluator
+    custom_eval = ExitEvaluator(hourly_trailing_activate_pct=0.0)
+    # peak PnL +25%, current +12.5%, retrace 50% — trailing disabled → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.50625, highest=0.5625, minutes_left=35)
+    d = custom_eval.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_holds_near_expiry(strategy_mode):
+    # peak +25%, retrace 50%, tapi sisa 8m < 10m → trailing skipped → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.50625, highest=0.5625, minutes_left=8)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
+
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_hourly_trailing_does_not_trigger_when_pnl_negative(strategy_mode):
+    # peak +20%, current -5% — retrace > 100% tapi PnL negatif → HOLD (jangan exit di rugi)
+    pos = make_hourly_position(strategy_mode, current=0.4275, highest=0.54, minutes_left=35)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD

@@ -13,7 +13,7 @@ if str(_ROOT) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(_ROOT / ".env")
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from src.models.database import (
     get_open_positions,
     get_trade_history,
@@ -21,10 +21,11 @@ from src.models.database import (
 )
 
 def main():
-    now = datetime.now(timezone.utc)
+    now     = datetime.now(timezone.utc)
+    now_wib = now + timedelta(hours=7)
     print("=" * 65)
     print(f"  POLYMARKET BOT — DAILY MONITOR")
-    print(f"  {now.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"  {now.strftime('%Y-%m-%d %H:%M UTC')}  /  {now_wib.strftime('%Y-%m-%d %H:%M WIB')}")
     print("=" * 65)
 
     stats  = get_stats()
@@ -107,7 +108,17 @@ def main():
         print("   Belum ada trade history.")
     else:
         for t in trades:
-            ts     = t.get("timestamp", "")[:16]
+            raw_ts = t.get("timestamp", "")
+            try:
+                ts_dt  = datetime.fromisoformat(raw_ts)
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                ts_utc = ts_dt.strftime("%Y-%m-%d %H:%M UTC")
+                ts_wib = (ts_dt + timedelta(hours=7)).strftime("%H:%M WIB")
+                ts_label = f"{ts_utc} / {ts_wib}"
+            except Exception:
+                ts_label = raw_ts[:16]
+
             action = t.get("action", "").upper()
             q      = t.get("question", "")[:38]
             price  = float(t.get("price", 0))
@@ -120,7 +131,7 @@ def main():
             else:
                 result_label = ""
 
-            print(f"   [{ts}] {action} {t['outcome']} {result_label} | "
+            print(f"   [{ts_label}] {action} {t['outcome']} {result_label} | "
                   f"{q} | @ {price:.3f} | ${usdc:.2f}")
 
     if positions:
@@ -133,9 +144,13 @@ def main():
         low_edge  = [p for p in positions if _edge(p) < 5]
 
         if high_edge:
-            print(f"   🔥 {len(high_edge)} posisi dengan edge tinggi (>15%) — hold!")
+            print(f"   🔥 Edge tinggi (>15%) — hold!")
+            for p in high_edge:
+                print(f"      • {p['question'][:50]} | {p['outcome']} | edge {_edge(p):.1f}%")
         if low_edge:
-            print(f"   ⚠️  {len(low_edge)} posisi dengan edge rendah (<5%) — monitor ketat")
+            print(f"   ⚠️  Edge rendah (<5%) — monitor ketat")
+            for p in low_edge:
+                print(f"      • {p['question'][:50]} | {p['outcome']} | edge {_edge(p):.1f}%")
         if not high_edge and not low_edge:
             print(f"   ✅ Semua posisi dalam range normal (5-15% edge)")
 

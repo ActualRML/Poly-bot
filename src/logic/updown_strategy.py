@@ -200,6 +200,33 @@ async def calculate_updown_probability_hourly(
     )
     return prob_up
 
+async def calculate_recent_momentum(
+    symbol: str,
+    session: aiohttp.ClientSession,
+    minutes: int = 15,
+) -> Optional[float]:
+    from src.api.binance_client import fetch_klines, fetch_price
+
+    now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = now_ms - minutes * 60 * 1000
+
+    klines = await fetch_klines(symbol, session, interval="1m", limit=1, start_ms=start_ms)
+    if not klines:
+        return None
+
+    past_price    = klines[0][1]
+    current_price = await fetch_price(symbol, session)
+    if not current_price or past_price <= 0:
+        return None
+
+    momentum = (current_price - past_price) / past_price
+    logger.debug(
+        f"[MOMENTUM] {symbol} {minutes}m: ${past_price:,.2f} → ${current_price:,.2f} "
+        f"= {momentum:+.3%}"
+    )
+    return momentum
+
+
 def _norm_cdf(x: float) -> float:
     import math
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
