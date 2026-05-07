@@ -120,20 +120,6 @@ class ExitEvaluator:
         if pos.strategy_mode in self._HOURLY_STRATEGIES:
             mins = pos.minutes_to_resolve
             pnl_pct = float(pos.unrealized_pnl_pct)
-            if (mins > 30 and pnl_pct >= self.hourly_profit_lock_pct) or \
-               (mins > 20 and pnl_pct >= self.hourly_profit_lock_high_pct):
-                pnl = self._calc_pnl(pos)
-                return ExitDecision(
-                    signal=ExitSignal.EXIT_LOCK_PROFIT,
-                    should_exit=True,
-                    position=pos,
-                    suggested_exit_price=pos.current_price,
-                    estimated_pnl_usdc=pnl,
-                    reason=(
-                        f"Profit lock hourly! PnL {pnl_pct:+.1f}% | "
-                        f"{mins:.0f}m tersisa → exit dini"
-                    ),
-                )
 
             if (self.hourly_trailing_activate_pct > 0 and mins > 10
                     and pos.entry_price > Decimal("0")):

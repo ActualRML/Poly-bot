@@ -112,26 +112,26 @@ def test_updown_hourly_holds_near_expiry(strategy_mode):
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_profit_lock_triggers(strategy_mode):
-    # PnL >= 30% dan resolve > 30 menit → EXIT (low threshold)
+def test_updown_hourly_no_fixed_profit_lock(strategy_mode):
+    # Fixed profit lock dihapus — PnL 33% dengan 35m left → HOLD (bukan exit)
     pos = make_hourly_position(strategy_mode, current=0.60, highest=0.60, minutes_left=35)
     d = evaluator.evaluate(pos)
-    assert d.should_exit is True
-    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_profit_lock_high_triggers(strategy_mode):
-    # PnL >= 50% dan resolve > 20 menit → EXIT (high threshold)
+def test_updown_hourly_no_fixed_profit_lock_high(strategy_mode):
+    # Fixed profit lock dihapus — PnL 55% dengan 25m left → HOLD (bukan exit)
     pos = make_hourly_position(strategy_mode, current=0.70, highest=0.70, minutes_left=25)
     d = evaluator.evaluate(pos)
-    assert d.should_exit is True
-    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_holds_under_low_threshold(strategy_mode):
-    # PnL ~22% < 30% → HOLD
+def test_updown_hourly_holds_under_trailing_threshold(strategy_mode):
+    # PnL ~22% belum trigger trailing (peak == current, retrace 0%) → HOLD
     pos = make_hourly_position(strategy_mode, current=0.55, highest=0.55, minutes_left=35)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
