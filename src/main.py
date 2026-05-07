@@ -1091,7 +1091,6 @@ async def _analyze_updown_hourly_market(
     btc_regime: float | None = None,
 ):
     import json as _json
-    from src.logic.updown_strategy import calculate_updown_probability_hourly, calculate_recent_momentum
     from src.logic.pricing import ke_decimal
 
     symbol = market.get("_symbol", "")
@@ -1161,27 +1160,24 @@ async def _analyze_updown_hourly_market(
             )
             return
 
-    prob_up = await calculate_updown_probability_hourly(
-        symbol, session, vol_data or {}, end_date, start_date
-    )
-    if prob_up is None:
+    # Pure momentum strategy: BTC 15m momentum menentukan arah, model log-normal dihapus
+    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
+    if btc_regime is None or regime_thr <= 0 or abs(btc_regime) < regime_thr:
+        logger.debug(
+            f"[UPDOWN HOURLY] {symbol} — BTC momentum "
+            f"{f'{btc_regime:+.2%}' if btc_regime is not None else 'N/A'} "
+            f"< threshold {regime_thr:.1%}, skip"
+        )
         return
 
-    edge      = prob_up - market_price_up
-    threshold = config.UPDOWN_HOURLY_THRESHOLD
-
-    if abs(edge) < threshold:
-        logger.debug(f"[UPDOWN HOURLY] {symbol} edge={edge:+.3f} < {threshold:.2f} — skip")
-        return
-
-    if edge > 0:
+    if btc_regime > 0:
         buy_outcome = "Up"
         buy_price   = market_price_up
-        buy_winrate = prob_up
     else:
         buy_outcome = "Down"
         buy_price   = round(1.0 - market_price_up, 4)
-        buy_winrate = round(1.0 - prob_up, 4)
+
+    buy_winrate = 0.55
 
     if buy_price <= 0 or buy_price >= 1:
         return
@@ -1190,45 +1186,9 @@ async def _analyze_updown_hourly_market(
     if max_entry > 0 and buy_price > max_entry:
         logger.debug(
             f"[UPDOWN HOURLY] Skip {symbol} {buy_outcome} — "
-            f"buy_price {buy_price:.3f} > max {max_entry:.3f} (upside terlalu tipis)"
+            f"buy_price {buy_price:.3f} > max {max_entry:.3f} (odds terlalu tipis)"
         )
         return
-
-    min_wr = getattr(config, "UPDOWN_HOURLY_MIN_WINRATE", 0.55)
-    if buy_winrate < min_wr:
-        logger.debug(f"[UPDOWN HOURLY] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
-        return
-
-    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
-    if btc_regime is not None and regime_thr > 0:
-        if buy_outcome == "Down" and btc_regime > regime_thr:
-            logger.info(
-                f"[UPDOWN HOURLY] Skip {symbol} Down — BTC regime BULLISH ({btc_regime:+.2%})"
-            )
-            return
-        if buy_outcome == "Up" and btc_regime < -regime_thr:
-            logger.info(
-                f"[UPDOWN HOURLY] Skip {symbol} Up — BTC regime BEARISH ({btc_regime:+.2%})"
-            )
-            return
-
-    momentum_min = config.UPDOWN_HOURLY_MOMENTUM_MINUTES
-    momentum_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
-    if momentum_thr > 0:
-        momentum = await calculate_recent_momentum(symbol, session, minutes=momentum_min)
-        if momentum is not None:
-            if buy_outcome == "Up" and momentum < -momentum_thr:
-                logger.info(
-                    f"[UPDOWN HOURLY] Skip {symbol} Up — momentum {momentum:+.2%} "
-                    f"in {momentum_min}m < -{momentum_thr:.1%}"
-                )
-                return
-            if buy_outcome == "Down" and momentum > momentum_thr:
-                logger.info(
-                    f"[UPDOWN HOURLY] Skip {symbol} Down — momentum {momentum:+.2%} "
-                    f"in {momentum_min}m > +{momentum_thr:.1%}"
-                )
-                return
 
     kelly = sizer.calculate(
         winrate      = buy_winrate,
@@ -1250,7 +1210,7 @@ async def _analyze_updown_hourly_market(
     log.info(
         f"[bold cyan][UPDOWN HOURLY][/bold cyan] {symbol} {t_min:.0f}m left | "
         f"BUY {buy_outcome} @ {buy_price:.3f} | "
-        f"P(Up)={prob_up:.3f} Mkt={market_price_up:.3f} Edge={edge:+.3f} | "
+        f"BTC momentum {btc_regime:+.2%} | "
         f"Kelly ${float(kelly.bet_usdc):.2f}"
     )
 
@@ -1287,7 +1247,7 @@ async def _analyze_updown_hourly_market(
                 shares          = kelly.shares,
                 capital_at_risk = kelly.bet_usdc,
                 resolve_date    = resolve_date,
-                gap_pct         = abs(edge),
+                gap_pct         = abs(btc_regime or 0.0),
                 kelly_fraction  = float(kelly.bet_fraction),
                 strategy_mode   = "updown_hourly_dry_run",
                 token_id        = token_id,
@@ -1298,7 +1258,7 @@ async def _analyze_updown_hourly_market(
                 "outcome":        buy_outcome,
                 "predicted_prob": str(round(buy_winrate, 4)),
                 "market_price":   str(buy_price),
-                "gap_pct":        str(round(abs(edge) * 100, 2)),
+                "gap_pct":        str(round(abs(btc_regime or 0.0) * 100, 2)),
                 "resolve_date":   resolve_date.isoformat(),
             })
         else:
@@ -1322,7 +1282,7 @@ async def _analyze_updown_hourly_market(
                     shares          = kelly.shares,
                     capital_at_risk = kelly.bet_usdc,
                     resolve_date    = resolve_date,
-                    gap_pct         = abs(edge),
+                    gap_pct         = abs(btc_regime or 0.0),
                     kelly_fraction  = float(kelly.bet_fraction),
                     strategy_mode   = "updown_hourly",
                     token_id        = token_id,
@@ -1333,7 +1293,7 @@ async def _analyze_updown_hourly_market(
                     "outcome":        buy_outcome,
                     "predicted_prob": str(round(buy_winrate, 4)),
                     "market_price":   str(buy_price),
-                    "gap_pct":        str(round(abs(edge) * 100, 2)),
+                    "gap_pct":        str(round(abs(btc_regime or 0.0) * 100, 2)),
                     "resolve_date":   resolve_date.isoformat(),
                 })
 
@@ -1344,7 +1304,7 @@ async def _analyze_updown_hourly_market(
                 outcome  = buy_outcome,
                 price    = buy_price,
                 bet_usdc = float(kelly.bet_usdc),
-                gap_pct  = abs(edge) * 100,
+                gap_pct  = abs(btc_regime or 0.0) * 100,
                 ev       = float(kelly.expected_value),
                 session  = session,
                 dry_run  = config.DRY_RUN,
