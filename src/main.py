@@ -585,7 +585,7 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
     else:
         log.info(f"[RECONCILE] Selesai — semua {len(positions)} posisi masih aktif")
 
-async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.ClientSession) -> set[str]:
+async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.ClientSession, current_prices: dict | None = None) -> set[str]:
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -625,6 +625,11 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
                 pass
 
         hours_past = (now - resolve).total_seconds() / 3600
+
+        if price is None and current_prices:
+            cached = (current_prices.get(cid) or {}).get(outcome)
+            if cached is not None:
+                price = float(cached)
 
         if price is None:
             if hours_past > 2:
@@ -1376,16 +1381,14 @@ async def run_mispricing_mode(clob: ClobClient):
             try:
                 await _backfill_missing_token_ids(gamma, session)
                 closed_this_cycle: set[str] = set()
-                closed_this_cycle |= await _resolve_checker(clob, gamma, manager, breaker, session)
+                current_prices = await _fetch_current_prices(clob, manager)
+                closed_this_cycle |= await _resolve_checker(clob, gamma, manager, breaker, session, current_prices)
 
                 if config.DRY_RUN:
                     from src.models.database import get_open_positions as _get_open, get_stats as _get_stats
                     locked        = sum(float(p["capital_at_risk"]) for p in _get_open())
                     realized_pnl  = float(_get_stats().get("total_pnl") or 0)
                     balance       = max(0.0, float(config.SALDO_AWAL) + realized_pnl - locked)
-                    total_capital = float(config.SALDO_AWAL) + realized_pnl
-                    breaker.starting_capital       = total_capital
-                    breaker.state.starting_capital = total_capital
                 else:
                     balance = clob.get_balance()
                 capital = balance
@@ -1401,8 +1404,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     f"BNB {vol_data.get('BNB', 0.40):.0%} | "
                     f"XRP {vol_data.get('XRP', 0.40):.0%} (annualized)"
                 )
-
-                current_prices = await _fetch_current_prices(clob, manager)
 
                 open_prices = [
                     float(p)
