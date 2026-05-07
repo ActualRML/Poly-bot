@@ -70,3 +70,31 @@ PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset BT
 | `.env.local` | Strategy params (Kelly, threshold, circuit breaker, dll) |
 
 Set `DRY_RUN=True` di `.env.local` untuk paper trade (tidak ada order nyata).
+
+## MCP (Model Context Protocol)
+
+Project ini menggunakan [Ruflo](https://github.com/ruvnet/ruflo) sebagai MCP server untuk integrasi Claude Code.
+
+### Setup Ruflo
+
+Ruflo sudah dikonfigurasi di `.mcp.json` — tidak perlu setup manual. Pastikan Node.js terinstall, lalu jalankan Claude Code dari direktori project ini.
+
+```bash
+# Verifikasi konfigurasi MCP
+cat .mcp.json
+```
+
+MCP server Ruflo dijalankan otomatis via:
+
+```
+npx ruflo@latest mcp start
+```
+
+### Ruflo Plugins
+
+```
+/plugin marketplace add ruvnet/ruflo
+/plugin install ruflo-neural-trader@ruflo
+/plugin install ruflo-market-data@ruflo
+/plugin install ruflo-intelligence@ruflo
+```

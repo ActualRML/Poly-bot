@@ -362,7 +362,7 @@ async def _analyze_market(
                 logger.debug(f"Skip {condition_id[:8]} {buy_outcome}: {reason}")
                 continue
 
-            if not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+            if config.CB_ENABLED and not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
                 logger.warning("[CIRCUIT BREAKER] Skip posisi — circuit breaker triggered")
                 return
 
@@ -545,6 +545,9 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
         try:
             price = await _get_resolved_price_from_gamma(gamma, session, cid, outcome)
 
+            if price is not None and not (price >= 0.98 or price <= 0.02):
+                price = None
+
             if price is None and tid:
                 try:
                     snapshot = clob.ambil_snapshot(token_id=tid)
@@ -572,6 +575,18 @@ async def reconcile_positions(clob, gamma, manager, breaker, session: aiohttp.Cl
                 f"[RECONCILE] {'✅ WIN' if won else '❌ LOSE'} — "
                 f"{pos['question'][:45]} | {outcome} @ {price:.3f} | PnL: ${float(pnl):+.2f}"
             )
+
+            alert = get_alert()
+            if alert:
+                await alert.alert_exit(
+                    question    = pos["question"],
+                    outcome     = outcome,
+                    entry_price = float(ke_decimal(pos["entry_price"])),
+                    exit_price  = price,
+                    pnl_usdc    = float(pnl),
+                    reason      = "reconcile_startup",
+                    session     = session,
+                )
 
         except asyncio.TimeoutError:
             log.warning(f"[RECONCILE] Timeout cek {cid[:8]} {outcome} — skip, akan dicek ulang di loop")
@@ -903,7 +918,7 @@ async def _analyze_updown_market(
             logger.debug(f"[UPDOWN] Skip {condition_id[:8]} {buy_outcome}: {reason}")
             return
 
-        if not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+        if config.CB_ENABLED and not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
             return
 
         try:
@@ -1073,6 +1088,7 @@ async def _analyze_updown_hourly_market(
     vol_data: dict | None = None,
     closed_this_cycle: set | None = None,
     profit_locked_markets: set | None = None,
+    btc_regime: float | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability_hourly, calculate_recent_momentum
@@ -1183,6 +1199,19 @@ async def _analyze_updown_hourly_market(
         logger.debug(f"[UPDOWN HOURLY] {symbol} winrate {buy_winrate:.2f} < {min_wr:.2f} — skip")
         return
 
+    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
+    if btc_regime is not None and regime_thr > 0:
+        if buy_outcome == "Down" and btc_regime > regime_thr:
+            logger.info(
+                f"[UPDOWN HOURLY] Skip {symbol} Down — BTC regime BULLISH ({btc_regime:+.2%})"
+            )
+            return
+        if buy_outcome == "Up" and btc_regime < -regime_thr:
+            logger.info(
+                f"[UPDOWN HOURLY] Skip {symbol} Up — BTC regime BEARISH ({btc_regime:+.2%})"
+            )
+            return
+
     momentum_min = config.UPDOWN_HOURLY_MOMENTUM_MINUTES
     momentum_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
     if momentum_thr > 0:
@@ -1240,7 +1269,7 @@ async def _analyze_updown_hourly_market(
             logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} {buy_outcome}: {reason}")
             return
 
-        if not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+        if config.CB_ENABLED and not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
             return
 
         try:
@@ -1414,62 +1443,33 @@ async def run_mispricing_mode(clob: ClobClient):
                     manager.exit_evaluator.trailing_stop_pct = Decimal(str(new_stop))
                     logger.debug(f"[STOP] trailing_stop={new_stop:.1%} avg_P={avg_P:.2f}")
 
-                closed_this_cycle |= await _force_exit_check(clob, manager, breaker, current_prices, session)
-                exits = manager.evaluate_exits(current_prices)
-                closed_this_cycle |= {d.position.condition_id for d in exits}
-                for _d in exits:
-                    if _d.signal.value == "exit_lock_profit":
-                        _profit_locked_markets.add(_d.position.condition_id)
-                for decision in exits:
-                    pos = decision.position
+                # update harga open positions di DB (untuk monitor) tanpa trigger exit
+                from src.models.database import get_open_positions as _gop, update_position_price as _upp
+                for _pos in _gop():
+                    _cid, _out = _pos["condition_id"], _pos["outcome"]
+                    _p = (current_prices.get(_cid) or {}).get(_out)
+                    if _p:
+                        _upp(_cid, _out, _p)
 
-                    if not config.DRY_RUN and pos.token_id:
-                        clob.pasang_order(
-                            sisi     = SisiOrder.JUAL,
-                            harga    = pos.current_price,
-                            ukuran   = pos.shares,
-                            token_id = pos.token_id,
-                        )
-                    elif config.DRY_RUN:
-                        log.warning(
-                            f"[yellow][DRY RUN] Simulasi exit {pos.outcome} "
-                            f"@ {float(pos.current_price):.3f}[/yellow]"
-                        )
+                if config.CB_ENABLED:
+                    cb_status = breaker.check(unrealized_pnl=manager.get_unrealized_pnl())
+                    if not cb_status.can_trade:
+                        log.warning(f"[CIRCUIT BREAKER] {cb_status}")
+                        if not _cb_alerted:
+                            alert = get_alert()
+                            if alert:
+                                await alert.alert_circuit_breaker(
+                                    reason       = str(cb_status),
+                                    drawdown_pct = getattr(cb_status, "drawdown_pct", 0.0),
+                                    session      = session,
+                                )
+                            _cb_alerted = True
+                        await asyncio.sleep(config.POLLING_INTERVAL)
+                        continue
+                    _cb_alerted = False
 
-                    if decision.estimated_pnl_usdc is not None:
-                        breaker.record_trade(float(decision.estimated_pnl_usdc))
-                        alert = get_alert()
-                        if alert:
-                            await alert.alert_exit(
-                                question    = pos.question,
-                                outcome     = pos.outcome,
-                                entry_price = float(pos.entry_price),
-                                exit_price  = float(pos.current_price),
-                                pnl_usdc    = float(decision.estimated_pnl_usdc),
-                                reason      = decision.reason,
-                                session     = session,
-                            )
-
-                if exits:
-                    log.info(f"[yellow]{len(exits)} posisi di-exit cycle ini[/yellow]")
-
-                cb_status = breaker.check(unrealized_pnl=manager.get_unrealized_pnl())
-                if not cb_status.can_trade:
-                    log.warning(f"[CIRCUIT BREAKER] {cb_status}")
-                    if not _cb_alerted:
-                        alert = get_alert()
-                        if alert:
-                            await alert.alert_circuit_breaker(
-                                reason       = str(cb_status),
-                                drawdown_pct = getattr(cb_status, "drawdown_pct", 0.0),
-                                session      = session,
-                            )
-                        _cb_alerted = True
-                    await asyncio.sleep(config.POLLING_INTERVAL)
-                    continue
-                _cb_alerted = False
-
-                log.info(breaker.get_summary(unrealized_pnl=manager.get_unrealized_pnl()))
+                if config.CB_ENABLED:
+                    log.info(breaker.get_summary(unrealized_pnl=manager.get_unrealized_pnl()))
                 await _prefetch_prices(session)
 
                 markets = await gamma.ascan_hourly_opportunities(
@@ -1481,50 +1481,35 @@ async def run_mispricing_mode(clob: ClobClient):
                     limit                  = 500,
                 )
 
-                daily_drawdown = breaker.state.daily_loss / breaker.starting_capital
-                safety         = breaker.check_safety_thresholds(btc_vol, daily_drawdown)
-                if safety.halt_new_entries:
-                    log.warning(f"[SAFETY HALT] {safety}")
-                    alert = get_alert()
-                    if alert:
-                        await alert.alert_circuit_breaker(
-                            reason       = safety.reason,
-                            drawdown_pct = abs(daily_drawdown),
-                            session      = session,
-                        )
-
-                cb_ok = breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade
-                if cb_ok and not safety.halt_new_entries:
-                    log.info("[bold]── DAILY CRYPTO ─────────────────────────────────[/bold]")
-                    log.info(f"Scan: {len(markets)} market lolos filter")
-                    results = await asyncio.gather(*[
-                        _analyze_market(
-                            market, clob, gamma, detector, sizer, manager,
-                            builder, breaker, capital, session, vol_data=vol_data,
-                            closed_this_cycle=closed_this_cycle,
-                            profit_locked_markets=_profit_locked_markets,
-                        )
-                        for market in markets
-                    ], return_exceptions=True)
-                    for r in results:
-                        if isinstance(r, Exception):
-                            logger.warning(f"[ANALYZE] Error di market analysis: {str(r).replace('[', '\\[')}")
-
-                    log.info("[bold]── UP/DOWN DAILY ────────────────────────────────[/bold]")
-                    updown_markets = await _scan_updown_markets(session, gamma)
-                    log.info(f"[UPDOWN DAILY] {len(updown_markets)} active market")
-                    for ud_mkt in updown_markets:
-                        try:
-                            await _analyze_updown_market(
-                                ud_mkt, clob, gamma, sizer, manager,
-                                breaker, capital, session, vol_data=vol_data,
-                                closed_this_cycle=closed_this_cycle,
-                                profit_locked_markets=_profit_locked_markets,
+                if config.CB_ENABLED:
+                    daily_drawdown = breaker.state.daily_loss / breaker.starting_capital
+                    safety         = breaker.check_safety_thresholds(btc_vol, daily_drawdown)
+                    if safety.halt_new_entries:
+                        log.warning(f"[SAFETY HALT] {safety}")
+                        alert = get_alert()
+                        if alert:
+                            await alert.alert_circuit_breaker(
+                                reason       = safety.reason,
+                                drawdown_pct = abs(daily_drawdown),
+                                session      = session,
                             )
-                        except Exception as e:
-                            logger.warning(f"[UPDOWN DAILY] Error analyze {ud_mkt.get('_symbol', '?')}: {e}")
+                    can_enter = breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade and not safety.halt_new_entries
+                else:
+                    can_enter = True
 
+                if can_enter:
                     log.info("[bold]── UP/DOWN HOURLY ───────────────────────────────[/bold]")
+                    from src.logic.updown_strategy import calculate_recent_momentum as _btc_mom
+                    btc_regime = await _btc_mom("BTC", session, minutes=config.UPDOWN_HOURLY_MOMENTUM_MINUTES)
+                    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
+                    if btc_regime is not None and regime_thr > 0:
+                        if btc_regime > regime_thr:
+                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BULLISH, skip semua posisi Down")
+                        elif btc_regime < -regime_thr:
+                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BEARISH, skip semua posisi Up")
+                        else:
+                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → NEUTRAL, buka dua arah")
+
                     hourly_markets = await _scan_updown_hourly_markets(session, gamma)
                     log.info(f"[UPDOWN HOURLY] {len(hourly_markets)} active market")
                     for hm in hourly_markets:
@@ -1534,6 +1519,7 @@ async def run_mispricing_mode(clob: ClobClient):
                                 breaker, capital, session, vol_data=vol_data,
                                 closed_this_cycle=closed_this_cycle,
                                 profit_locked_markets=_profit_locked_markets,
+                                btc_regime=btc_regime,
                             )
                         except Exception as e:
                             logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")

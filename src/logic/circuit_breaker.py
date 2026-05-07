@@ -255,13 +255,10 @@ class CircuitBreaker:
         self._save_state()
         logger.info(f"🟠 Saklar 2 di-reset: {reason}")
 
-    def reset_drawdown(self, new_capital: float, reason: str = "manual reset"):
+    def reset_drawdown(self, reason: str = "manual reset"):
         self.state.saklar_3_triggered = False
-        self.state.current_capital    = new_capital
-        self.state.starting_capital   = new_capital
-        self.starting_capital         = new_capital
         self._save_state()
-        logger.info(f"🔴 Saklar 3 di-reset: {reason} | Modal baru: ${new_capital:.2f}")
+        logger.info(f"🔴 Saklar 3 di-reset: {reason} | Starting capital tetap: ${self.starting_capital:.2f}")
 
     def reset_daily(self):
         today = date.today().isoformat()

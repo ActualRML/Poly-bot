@@ -81,6 +81,7 @@ class Config:
     HOURLY_TRAILING_ACTIVATE_PCT      : float = _get_float("HOURLY_TRAILING_ACTIVATE_PCT", 15.0)
     HOURLY_TRAILING_RETRACE_PCT       : float = _get_float("HOURLY_TRAILING_RETRACE_PCT", 0.30)
 
+    CB_ENABLED       : bool    = _get_bool("CB_ENABLED", False)
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
     POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
