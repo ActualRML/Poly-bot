@@ -118,40 +118,12 @@ class ExitEvaluator:
 
     def evaluate(self, pos: Position) -> ExitDecision:
         if pos.strategy_mode in self._HOURLY_STRATEGIES:
-            mins = pos.minutes_to_resolve
-            pnl_pct = float(pos.unrealized_pnl_pct)
-
-            if (self.hourly_trailing_activate_pct > 0 and mins > 10
-                    and pos.entry_price > Decimal("0")):
-                peak_pnl_pct = float(
-                    ((pos.highest_price - pos.entry_price) / pos.entry_price * 100
-                     ).quantize(Decimal("0.01"))
-                )
-                if (peak_pnl_pct >= self.hourly_trailing_activate_pct
-                        and peak_pnl_pct > 0
-                        and pnl_pct > 0):
-                    retrace = (peak_pnl_pct - pnl_pct) / peak_pnl_pct
-                    if retrace >= self.hourly_trailing_retrace_pct:
-                        pnl = self._calc_pnl(pos)
-                        return ExitDecision(
-                            signal=ExitSignal.EXIT_LOCK_PROFIT,
-                            should_exit=True,
-                            position=pos,
-                            suggested_exit_price=pos.current_price,
-                            estimated_pnl_usdc=pnl,
-                            reason=(
-                                f"Trailing profit lock! Peak PnL {peak_pnl_pct:+.1f}% → "
-                                f"current {pnl_pct:+.1f}% (retrace {retrace:.0%}) | "
-                                f"{mins:.0f}m tersisa"
-                            ),
-                        )
-
             return ExitDecision(
                 signal=ExitSignal.HOLD,
                 should_exit=False,
                 position=pos,
                 estimated_pnl_usdc=self._calc_pnl(pos),
-                reason="Hold to resolve — hourly binary market, no trailing stop",
+                reason="Hold to resolve — hourly binary market",
             )
 
         if pos.strategy_mode in self._DAILY_STRATEGIES:
