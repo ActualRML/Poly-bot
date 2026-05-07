@@ -517,8 +517,6 @@ async def _get_resolved_price_from_gamma(gamma, session, condition_id: str, outc
         if not outcome_prices:
             return None
         prices_float = [float(p) for p in outcome_prices]
-        if not all(p in (0.0, 1.0) for p in prices_float):
-            return None
         if outcome not in outcomes:
             return None
         idx = outcomes.index(outcome)
