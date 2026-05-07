@@ -54,7 +54,7 @@ class Config:
     HOURLY_PROFIT_LOCK_PCT       : float = _get_float("HOURLY_PROFIT_LOCK_PCT", 30.0)
     HOURLY_PROFIT_LOCK_HIGH_PCT  : float = _get_float("HOURLY_PROFIT_LOCK_HIGH_PCT", 50.0)
 
-    MAX_DRAWDOWN_PCT       : float = _get_float("MAX_DRAWDOWN_PCT", 0.20)
+    MAX_DRAWDOWN_PCT       : float = _get_float("MAX_DRAWDOWN_PCT", 0.40)
     MAX_DAILY_LOSS_PCT     : float = _get_float("MAX_DAILY_LOSS_PCT", 0.20)
     MAX_CONSECUTIVE_LOSSES : int   = _get_int("MAX_CONSECUTIVE_LOSSES", 5)
 

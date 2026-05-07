@@ -135,6 +135,9 @@ async def _force_exit_check(
         if not should_force_exit(expiry):
             continue
 
+        if pos.get("strategy_mode", "") in ("updown_hourly", "updown_hourly_dry_run"):
+            continue
+
         cid     = pos["condition_id"]
         outcome = pos["outcome"]
         tid     = pos.get("token_id") or ""
