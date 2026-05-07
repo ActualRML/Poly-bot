@@ -185,9 +185,9 @@ Update setiap cycle berdasarkan rata-rata harga posisi open dan BTC vol.
 - 3+ consecutive wins → cap **$30**
 - Default → **$20**
 
-**Direction cap:** `MAX_SAME_DIRECTION=2` — max 2 posisi searah (Up atau Down) bersamaan.
+**Direction cap:** `MAX_SAME_DIRECTION=0` (disabled untuk paper trade). Set `2-3` saat go live.
 
-**Slot cap:** `MAX_POSITIONS_PER_SLOT=2` — max 2 posisi yang resolve di slot waktu yang sama (±30 menit). Cegah correlation risk ketika multiple asset resolve bareng.
+**Slot cap:** `MAX_POSITIONS_PER_SLOT=0` (disabled untuk paper trade). Crypto correlation positif kuat — saat winrate tinggi (≥70%), filter ini lebih sering blokir cluster wins daripada cegah cluster losses. Set `3` saat go live untuk cegah skenario ekstrem 4-5 posisi searah.
 
 ---
 
