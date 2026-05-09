@@ -957,6 +957,7 @@ async def _analyze_updown_market(
     vol_data: dict | None = None,
     closed_this_cycle: set | None = None,
     profit_locked_markets: set | None = None,
+    market_regime: dict | None = None,
 ):
     import json as _json
     from src.logic.updown_strategy import calculate_updown_probability
@@ -1012,6 +1013,24 @@ async def _analyze_updown_market(
         logger.debug(f"[UPDOWN] {symbol} {delta_sec/3600:.1f}h left > {max_hours}h max — terlalu awal, skip")
         return
 
+    # T-floor: short windows (< N hours) too vulnerable to vol regime spikes
+    min_hours = getattr(config, "UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE", 2.0)
+    if delta_sec < min_hours * 3600:
+        logger.debug(
+            f"[UPDOWN] {symbol} {delta_sec/3600:.2f}h left < {min_hours}h floor "
+            f"— vol regime risk too high, skip"
+        )
+        return
+
+    # Apply vol floor before probability calc — prevents over-confident model
+    # when realized 4h vol is artificially low (calm before storm).
+    _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
+    if _vol_floor > 0 and vol_data:
+        vol_data = {
+            k: max(float(v), _vol_floor) if isinstance(v, (int, float)) else v
+            for k, v in vol_data.items()
+        }
+
     prob_up = await calculate_updown_probability(symbol, session, vol_data or {}, end_date)
     if prob_up is None:
         return
@@ -1034,6 +1053,23 @@ async def _analyze_updown_market(
 
     if buy_price <= 0 or buy_price >= 1:
         return
+
+    # Cross-asset regime filter — skip bet against strong consensus trend.
+    # If 70%+ of crypto basket is trending UP and HTF aligned, don't bet Down (vice versa).
+    if market_regime and market_regime.get("skip_contrarian"):
+        regime_dir = market_regime.get("direction")  # "up" / "down" / None
+        if regime_dir == "up" and buy_outcome == "Down":
+            logger.debug(
+                f"[UPDOWN] {symbol} skip — model picks Down but cross-asset trending UP "
+                f"(score={market_regime.get('trend_score')})"
+            )
+            return
+        if regime_dir == "down" and buy_outcome == "Up":
+            logger.debug(
+                f"[UPDOWN] {symbol} skip — model picks Up but cross-asset trending DOWN "
+                f"(score={market_regime.get('trend_score')})"
+            )
+            return
 
     min_wr = getattr(config, "UPDOWN_MIN_WINRATE", 0.55)
     if buy_winrate < min_wr:
@@ -1584,6 +1620,10 @@ async def _analyze_updown_hourly_market(
     if use_gbm:
         from src.logic.gbm_hourly import evaluate_hourly_entry
         vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
+        # Vol floor — prevents over-confident model during calm-before-storm windows
+        _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
+        if _vol_floor > 0:
+            vol_annual = max(vol_annual, _vol_floor)
         try:
             _gbm_decision = await evaluate_hourly_entry(
                 symbol          = symbol,

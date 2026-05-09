@@ -86,6 +86,8 @@ class Config:
     UPDOWN_HOURLY_FEE                 : float = _get_float("UPDOWN_HOURLY_FEE", 0.018)
     UPDOWN_HOURLY_OPPOSITE_REENTRY    : bool  = _get_bool("UPDOWN_HOURLY_OPPOSITE_REENTRY", True)
     UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES: int   = _get_int("UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES", 10)
+    UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE : float = _get_float("UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE", 2.0)
+    UPDOWN_VOL_FLOOR                  : float = _get_float("UPDOWN_VOL_FLOOR", 0.50)
 
     CB_ENABLED       : bool    = _get_bool("CB_ENABLED", False)
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
