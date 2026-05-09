@@ -156,6 +156,46 @@ class ClobClient:
             log.error(f"[red]Gagal pasang order: {e}[/red]")
             return None
 
+    def get_orderbook_depth(self, token_id: str) -> list[tuple[float, float]]:
+        """
+        Returns full bid stack as [(price, size), ...] sorted descending (best bid first).
+        Used by liquidity_check before placing a sell order.
+        """
+        if not token_id or not self._terhubung or not self._client:
+            return []
+        try:
+            buku = self._client.get_order_book(token_id)
+            bids = buku.bids or []
+            result = [(float(b.price), float(b.size)) for b in bids]
+            result.sort(key=lambda x: x[0], reverse=True)
+            return result
+        except Exception as e:
+            log.warning(f"[yellow]Gagal ambil order book depth {token_id[:12]}: {e}[/yellow]")
+            return []
+
+    def get_full_orderbook(self, token_id: str) -> dict:
+        """
+        Returns {"bids": [(price, size)...], "asks": [(price, size)...]}.
+        Bids sorted descending (best first), asks sorted ascending (best first).
+        Used by re-entry orderbook validation.
+        """
+        if not token_id or not self._terhubung or not self._client:
+            return {"bids": [], "asks": []}
+        try:
+            buku = self._client.get_order_book(token_id)
+            bids = sorted(
+                [(float(b.price), float(b.size)) for b in (buku.bids or [])],
+                key=lambda x: x[0], reverse=True,
+            )
+            asks = sorted(
+                [(float(a.price), float(a.size)) for a in (buku.asks or [])],
+                key=lambda x: x[0],
+            )
+            return {"bids": bids, "asks": asks}
+        except Exception as e:
+            log.warning(f"[yellow]Gagal ambil full orderbook {token_id[:12]}: {e}[/yellow]")
+            return {"bids": [], "asks": []}
+
     def batalkan_semua_order(self) -> bool:
         if config.DRY_RUN or not self._terhubung:
             return True

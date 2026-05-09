@@ -360,6 +360,21 @@ def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
 
     return [{"pnl": float(r["pnl_usdc"])} for r in reversed(rows)]
 
+
+def get_recent_closed_hourly(limit: int = 10) -> list[dict]:
+    """Recent closed hourly positions (live + dry-run) with question + pnl.
+    Used by per-symbol blacklist to detect loss streaks for a given asset."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT question, pnl_usdc FROM positions
+               WHERE status = 'closed' AND pnl_usdc IS NOT NULL
+                 AND strategy_mode IN ('updown_hourly', 'updown_hourly_dry_run')
+               ORDER BY exit_time DESC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+
+    return [{"question": r["question"], "pnl": float(r["pnl_usdc"])} for r in rows]
+
 def get_accuracy_report() -> dict:
 
     with get_conn() as conn:

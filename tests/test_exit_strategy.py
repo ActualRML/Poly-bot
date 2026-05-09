@@ -87,17 +87,53 @@ def make_hourly_position(strategy_mode: str, current: float, highest: float, min
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_never_exits_trailing_stop(strategy_mode):
-    # Harga crash jauh di bawah trailing stop threshold — seharusnya tetap HOLD
-    pos = make_hourly_position(strategy_mode, current=0.10, highest=0.45)
+def test_updown_hourly_no_early_sl_on_crash(strategy_mode):
+    # Posisi crash awal (>20m left) — TIDAK exit, kasih ruang recovery
+    pos = make_hourly_position(strategy_mode, current=0.10, highest=0.45, minutes_left=40)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
     assert d.signal == ExitSignal.HOLD
 
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_never_exits_even_near_zero(strategy_mode):
-    pos = make_hourly_position(strategy_mode, current=0.01, highest=0.45)
+def test_updown_hourly_late_sl_outer_fires_on_small_loss(strategy_mode):
+    # OUTER band (10-20m left): PnL ≤ -30% triggers (cut early, redeploy)
+    # Entry 0.45 → -33% berarti current ≤ 0.30
+    pos = make_hourly_position(strategy_mode, current=0.30, highest=0.45, minutes_left=18)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_CATASTROPHIC
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_late_sl_middle_fires_only_on_moderate_loss(strategy_mode):
+    # MIDDLE band (5-10m left): PnL ≤ -50% triggers, smaller losses HOLD
+    # Entry 0.45 → -55% berarti current ≤ 0.20
+    pos = make_hourly_position(strategy_mode, current=0.20, highest=0.45, minutes_left=8)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_CATASTROPHIC
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_late_sl_middle_holds_on_small_loss(strategy_mode):
+    # 7m left dengan -33% loss: di MIDDLE band (5-10m), threshold -50% → HOLD
+    # (di logic lama akan exit, sekarang hold karena threshold lebih lenient near resolve)
+    pos = make_hourly_position(strategy_mode, current=0.30, highest=0.45, minutes_left=7)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_late_sl_inner_fires_only_on_extreme(strategy_mode):
+    # INNER band (≤5m left): PnL ≤ -70% triggers, smaller losses HOLD
+    # Entry 0.45 → -75% berarti current ≤ 0.11
+    pos = make_hourly_position(strategy_mode, current=0.10, highest=0.45, minutes_left=4)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_CATASTROPHIC
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_late_sl_inner_holds_on_moderate_loss(strategy_mode):
+    # 3m left dengan -55% loss: di INNER band (≤5m), threshold -70% → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.20, highest=0.45, minutes_left=3)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
 

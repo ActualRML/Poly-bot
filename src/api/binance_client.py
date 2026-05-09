@@ -32,6 +32,63 @@ _VOL_TTL = 300
 _ban_until: float = 0.0
 _BAN_COOLDOWN = 300
 
+# ── Rate-limit shield ─────────────────────────────────────────────────────────
+_rate_weight_1m: int = 0          # last observed X-MBX-USED-WEIGHT-1M value
+_WEIGHT_LIMIT: int = 1200         # Binance spot default limit per minute
+_THROTTLE_PCT: float = 0.85       # reduce polling above this fraction
+_PAUSE_PCT: float = 0.95          # full pause above this fraction
+_rate_limit_status: str = "OK"    # "OK" | "THROTTLE" | "FULL_PAUSE"
+_rate_limit_set_at: float = 0.0   # monotonic timestamp when status was last elevated
+_RATE_WINDOW_S: float = 65.0      # Binance 1-min window + 5s buffer
+
+def _check_rate_auto_reset() -> None:
+    """Auto-reset FULL_PAUSE/THROTTLE after one Binance rate-limit window (65s)."""
+    global _rate_limit_status
+    import time as _time
+    if _rate_limit_status != "OK" and _time.monotonic() - _rate_limit_set_at >= _RATE_WINDOW_S:
+        logger.info(f"[BINANCE] Rate-limit window elapsed — reset status to OK")
+        _rate_limit_status = "OK"
+
+def _update_rate_weight(headers) -> None:
+    global _rate_weight_1m, _rate_limit_status, _rate_limit_set_at
+    import time as _time
+    raw = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+    if raw is None:
+        return
+    try:
+        _rate_weight_1m = int(raw)
+    except ValueError:
+        return
+    fraction = _rate_weight_1m / _WEIGHT_LIMIT
+    if fraction >= _PAUSE_PCT:
+        if _rate_limit_status != "FULL_PAUSE":
+            logger.warning(
+                f"[BINANCE] Rate weight {_rate_weight_1m}/{_WEIGHT_LIMIT} "
+                f"({fraction:.0%}) — FULL_PAUSE to avoid IP ban"
+            )
+            _rate_limit_set_at = _time.monotonic()
+        _rate_limit_status = "FULL_PAUSE"
+    elif fraction >= _THROTTLE_PCT:
+        if _rate_limit_status not in ("THROTTLE", "FULL_PAUSE"):
+            logger.warning(
+                f"[BINANCE] Rate weight {_rate_weight_1m}/{_WEIGHT_LIMIT} "
+                f"({fraction:.0%}) — entering THROTTLE mode"
+            )
+            _rate_limit_set_at = _time.monotonic()
+        _rate_limit_status = "THROTTLE"
+    else:
+        _rate_limit_status = "OK"
+
+def get_rate_limit_status() -> dict:
+    """Return current rate-limit consumption and status for health monitoring."""
+    _check_rate_auto_reset()
+    return {
+        "weight_used": _rate_weight_1m,
+        "weight_limit": _WEIGHT_LIMIT,
+        "fraction": round(_rate_weight_1m / _WEIGHT_LIMIT, 4),
+        "status": _rate_limit_status,
+    }
+
 _price_locks: dict[str, asyncio.Lock] = {}
 _vol_locks:   dict[str, asyncio.Lock] = {}
 
@@ -57,15 +114,16 @@ async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[f
     if symbol in _price_cache and now - _price_cache_time.get(symbol, 0) < _PRICE_TTL:
         return _price_cache[symbol]
 
-    if now < _ban_until:
-        logger.debug(f"[BINANCE] {symbol} ban aktif, pakai stale cache")
+    _check_rate_auto_reset()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        logger.debug(f"[BINANCE] {symbol} ban/pause aktif, pakai stale cache")
         return _price_cache.get(symbol)
 
     async with _get_price_lock(symbol):
         now = datetime.now(timezone.utc).timestamp()
         if symbol in _price_cache and now - _price_cache_time.get(symbol, 0) < _PRICE_TTL:
             return _price_cache[symbol]
-        if now < _ban_until:
+        if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
             return _price_cache.get(symbol)
 
         try:
@@ -81,6 +139,7 @@ async def fetch_price(symbol: str, session: aiohttp.ClientSession) -> Optional[f
                         f"Pakai stale cache kalau ada."
                     )
                     return _price_cache.get(symbol)
+                _update_rate_weight(resp.headers)
                 resp.raise_for_status()
                 data = await resp.json()
                 price = float(data["price"])
@@ -112,8 +171,9 @@ async def fetch_klines(
         params["endTime"] = end_ms
 
     now = datetime.now(timezone.utc).timestamp()
-    if now < _ban_until:
-        logger.debug(f"[BINANCE] Klines {symbol} skip — ban aktif")
+    _check_rate_auto_reset()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        logger.debug(f"[BINANCE] Klines {symbol} skip — ban/pause aktif")
         return []
 
     try:
@@ -126,6 +186,7 @@ async def fetch_klines(
                 _ban_until = now + _BAN_COOLDOWN
                 logger.warning(f"[BINANCE] Rate limit ({resp.status}) klines — pause {_BAN_COOLDOWN}s")
                 return []
+            _update_rate_weight(resp.headers)
             resp.raise_for_status()
             data = await resp.json()
 
@@ -138,6 +199,109 @@ async def fetch_klines(
     except Exception as e:
         logger.warning(f"[BINANCE] Klines fetch gagal {symbol}: {e}")
         return []
+
+
+async def fetch_klines_extended(
+    symbol: str,
+    session: aiohttp.ClientSession,
+    interval: str = "1m",
+    limit: int = 30,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+) -> list[tuple]:
+    """
+    Same as fetch_klines but also captures volume and taker-buy volume.
+    Returns (ts, open, high, low, close, volume, taker_buy_vol) tuples.
+    taker_buy_vol is the market-buy (aggressive buyer) volume per bar.
+    """
+    global _ban_until
+    ticker = SYMBOL_MAP.get(symbol.upper())
+    if not ticker:
+        return []
+
+    params: dict = {"symbol": ticker, "interval": interval, "limit": limit}
+    if start_ms is not None:
+        params["startTime"] = start_ms
+    if end_ms is not None:
+        params["endTime"] = end_ms
+
+    now = datetime.now(timezone.utc).timestamp()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        logger.debug(f"[BINANCE] Klines ext {symbol} skip — ban/pause aktif")
+        return []
+
+    try:
+        async with session.get(
+            f"{BINANCE_HOST}/api/v3/klines",
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status in (418, 429):
+                _ban_until = now + _BAN_COOLDOWN
+                logger.warning(f"[BINANCE] Rate limit ({resp.status}) klines ext — pause {_BAN_COOLDOWN}s")
+                return []
+            _update_rate_weight(resp.headers)
+            resp.raise_for_status()
+            data = await resp.json()
+
+        result = []
+        for row in data:
+            ts = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
+            o, h, l, c = float(row[1]), float(row[2]), float(row[3]), float(row[4])
+            vol = float(row[5])
+            taker_buy_vol = float(row[9]) if len(row) > 9 else vol / 2
+            result.append((ts, o, h, l, c, vol, taker_buy_vol))
+        return result
+    except Exception as e:
+        logger.warning(f"[BINANCE] Klines extended fetch gagal {symbol}: {e}")
+        return []
+
+async def fetch_spot_depth(
+    symbol: str,
+    session: aiohttp.ClientSession,
+    limit: int = 20,
+) -> dict:
+    """
+    Fetch Binance spot order book depth via GET /api/v3/depth.
+    Returns {"bids": [(price, size), ...], "asks": [(price, size), ...]}
+    sorted descending for bids, ascending for asks.
+    """
+    global _ban_until
+    ticker = SYMBOL_MAP.get(symbol.upper())
+    if not ticker:
+        return {"bids": [], "asks": []}
+
+    now = datetime.now(timezone.utc).timestamp()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        return {"bids": [], "asks": []}
+
+    try:
+        async with session.get(
+            f"{BINANCE_HOST}/api/v3/depth",
+            params={"symbol": ticker, "limit": limit},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status in (418, 429):
+                _ban_until = now + _BAN_COOLDOWN
+                logger.warning(f"[BINANCE] Rate limit ({resp.status}) depth — pause {_BAN_COOLDOWN}s")
+                return {"bids": [], "asks": []}
+            _update_rate_weight(resp.headers)
+            resp.raise_for_status()
+            data = await resp.json()
+
+        bids = sorted(
+            [(float(p), float(s)) for p, s in data.get("bids", [])],
+            key=lambda x: x[0], reverse=True,
+        )
+        asks = sorted(
+            [(float(p), float(s)) for p, s in data.get("asks", [])],
+            key=lambda x: x[0],
+        )
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        logger.warning(f"[BINANCE] Depth fetch gagal {symbol}: {e}")
+        return {"bids": [], "asks": []}
+
 
 def _compute_annualized_vol(closes: list[float]) -> Optional[float]:
     if len(closes) < 4:

@@ -11,11 +11,11 @@ pip install -r requirements.txt
 
 ### Akun & API Keys yang dibutuhkan
 
-| Layanan | Kebutuhan | Daftar |
-|---|---|---|
-| Polymarket | `PK_PRIVATE_KEY`, `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASS` | [polymarket.com](https://polymarket.com) |
-| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | [@BotFather](https://t.me/BotFather) |
-| FRED | `FRED_API_KEY` | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
+| Layanan    | Kebutuhan                                                    | Daftar                                                                   |
+| ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Polymarket | `PK_PRIVATE_KEY`, `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASS` | [polymarket.com](https://polymarket.com)                                 |
+| Telegram   | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`                     | [@BotFather](https://t.me/BotFather)                                     |
+| FRED       | `FRED_API_KEY`                                               | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 
 > Binance dan CoinGecko dipakai sebagai price feed — tidak butuh API key.
 
@@ -64,10 +64,10 @@ PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset BT
 
 ## Config
 
-| File | Isi |
-|---|---|
-| `.env.secret` | API keys, private key, Telegram token |
-| `.env.local` | Strategy params (Kelly, threshold, circuit breaker, dll) |
+| File          | Isi                                                      |
+| ------------- | -------------------------------------------------------- |
+| `.env.secret` | API keys, private key, Telegram token                    |
+| `.env.local`  | Strategy params (Kelly, threshold, circuit breaker, dll) |
 
 Set `DRY_RUN=True` di `.env.local` untuk paper trade (tidak ada order nyata).
 
@@ -98,3 +98,13 @@ npx ruflo@latest mcp start
 /plugin install ruflo-market-data@ruflo
 /plugin install ruflo-intelligence@ruflo
 ```
+
+Commands (ketik di Telegram):
+
+- /status — full report (portfolio + positions + trades + analysis)
+- /positions — open positions saja
+- /stats — portfolio summary
+- /trades — 10 trades terakhir
+- /trades 25 — N trades terakhir (max 50)
+- /ping — cek bot alive + jumlah posisi open
+- /help — list command

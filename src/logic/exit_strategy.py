@@ -12,6 +12,7 @@ class ExitSignal(Enum):
     EXIT_LOCK_PROFIT = "exit_lock_profit"
     HOLD_TO_RESOLVE  = "hold_to_resolve"
     EXIT_STALE       = "exit_stale"
+    EXIT_CATASTROPHIC = "exit_catastrophic"
 
 @dataclass
 class Position:
@@ -96,6 +97,25 @@ class ExitEvaluator:
         hourly_profit_lock_high_pct: float = 50.0,
         hourly_trailing_activate_pct: float = 15.0,
         hourly_trailing_retrace_pct: float = 0.30,
+        # Tiered late-stage stop-loss with exclusive bands.
+        # Filosofi: makin DEKAT resolve = makin LENIENT (threshold makin besar)
+        # karena slippage extreme + result udah ditentukan.
+        # T1 (last 5m, INNER):    PnL ≤ -70%  → only extreme triggers exit
+        # T2 (5-10m, MIDDLE):     PnL ≤ -50%  → moderate loss triggers exit
+        # T3 (10-20m, OUTER):     PnL ≤ -30%  → small loss triggers exit (cut early, redeploy)
+        hourly_late_sl_t1_pct: float = -70.0,
+        hourly_late_sl_t1_max_remaining: float = 5.0,
+        hourly_late_sl_t2_pct: float = -50.0,
+        hourly_late_sl_t2_max_remaining: float = 10.0,
+        hourly_late_sl_t3_pct: float = -30.0,
+        hourly_late_sl_t3_max_remaining: float = 20.0,
+        # Profit lock for hourly — fire pada profit besar, otherwise hold to resolve.
+        # T1 (≥200%): near-max ITM, kunci kapan saja >5m left
+        # T2 (≥150%): substantial profit, kunci kalau masih banyak waktu (>15m)
+        hourly_lock_t1_pct: float = 200.0,
+        hourly_lock_t1_min_remaining: float = 5.0,
+        hourly_lock_t2_pct: float = 150.0,
+        hourly_lock_t2_min_remaining: float = 15.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -111,6 +131,16 @@ class ExitEvaluator:
         self.hourly_profit_lock_high_pct = hourly_profit_lock_high_pct
         self.hourly_trailing_activate_pct = hourly_trailing_activate_pct
         self.hourly_trailing_retrace_pct = hourly_trailing_retrace_pct
+        self.hourly_late_sl_t1_pct = hourly_late_sl_t1_pct
+        self.hourly_late_sl_t1_max_remaining = hourly_late_sl_t1_max_remaining
+        self.hourly_late_sl_t2_pct = hourly_late_sl_t2_pct
+        self.hourly_late_sl_t2_max_remaining = hourly_late_sl_t2_max_remaining
+        self.hourly_late_sl_t3_pct = hourly_late_sl_t3_pct
+        self.hourly_late_sl_t3_max_remaining = hourly_late_sl_t3_max_remaining
+        self.hourly_lock_t1_pct = hourly_lock_t1_pct
+        self.hourly_lock_t1_min_remaining = hourly_lock_t1_min_remaining
+        self.hourly_lock_t2_pct = hourly_lock_t2_pct
+        self.hourly_lock_t2_min_remaining = hourly_lock_t2_min_remaining
 
     _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
     _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
@@ -118,6 +148,67 @@ class ExitEvaluator:
 
     def evaluate(self, pos: Position) -> ExitDecision:
         if pos.strategy_mode in self._HOURLY_STRATEGIES:
+            pnl_pct = float(pos.unrealized_pnl_pct)
+            mins = pos.minutes_to_resolve
+
+            # Tiered late-stage SL with EXCLUSIVE bands (no overlap).
+            # Threshold tumbuh seiring mendekati resolve karena slippage + result decided.
+            #
+            # T3 (10-20m, OUTER):  PnL ≤ -30%  → cut early, redeploy capital
+            # T2 (5-10m,  MIDDLE): PnL ≤ -50%
+            # T1 (0-5m,   INNER):  PnL ≤ -70%  → only extreme, slippage too costly otherwise
+            if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
+                    and pnl_pct <= self.hourly_late_sl_t3_pct):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL OUTER: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+            if (self.hourly_late_sl_t1_max_remaining < mins <= self.hourly_late_sl_t2_max_remaining
+                    and pnl_pct <= self.hourly_late_sl_t2_pct):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL MIDDLE: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+            if (mins <= self.hourly_late_sl_t1_max_remaining
+                    and pnl_pct <= self.hourly_late_sl_t1_pct):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL INNER: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+
+            # T1 (≥200%): near-max ITM — kunci kapan saja >5m left
+            if pnl_pct >= self.hourly_lock_t1_pct and mins > self.hourly_lock_t1_min_remaining:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"T1 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+            # T2 (≥150%): substantial profit — lock kalau masih banyak waktu reversal
+            if pnl_pct >= self.hourly_lock_t2_pct and mins > self.hourly_lock_t2_min_remaining:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"T2 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+
             return ExitDecision(
                 signal=ExitSignal.HOLD,
                 should_exit=False,
