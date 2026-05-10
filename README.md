@@ -41,11 +41,19 @@ cp .env.example .env.local
 python -m src.main
 ```
 
-### Monitor posisi live
+### Monitor posisi live (stdout)
 
 ```bash
 python -m script.monitor
 ```
+
+### Telegram interactive bot
+
+```bash
+python -m script.monitor_bot
+```
+
+Jalankan di terminal terpisah dari bot utama. Bot akan online dan siap menerima command dari Telegram.
 
 ### Recalibrate model (BTC/ETH/SOL/BNB)
 
@@ -99,12 +107,19 @@ npx ruflo@latest mcp start
 /plugin install ruflo-intelligence@ruflo
 ```
 
-Commands (ketik di Telegram):
+Commands (ketik di Telegram via `script.monitor_bot`):
 
-- /status — full report (portfolio + positions + trades + analysis)
-- /positions — open positions saja
-- /stats — portfolio summary
-- /trades — 10 trades terakhir
-- /trades 25 — N trades terakhir (max 50)
-- /ping — cek bot alive + jumlah posisi open
-- /help — list command
+| Command | Keterangan |
+|---|---|
+| `/status` | Full report: portfolio + posisi + 5 trade terakhir |
+| `/positions` | List posisi open **bernomor** (gunakan nomor untuk /tarik) |
+| `/stats` | Summary: total trades, winrate, PnL |
+| `/trades` | 10 trades terakhir |
+| `/trades 25` | N trades terakhir (max 50) |
+| `/tarik 1` | Tutup posisi nomor 1 (profit atau rugi) |
+| `/tarik 1 3` | Tutup posisi nomor 1 dan 3 sekaligus |
+| `/tarik` | Tutup semua posisi open |
+| `/ping` | Cek bot alive + jumlah posisi open |
+| `/help` | List semua command |
+
+> `/tarik` dieksekusi oleh bot utama di cycle berikutnya (~30 detik). Cek `/positions` dulu untuk tahu nomor masing-masing posisi.

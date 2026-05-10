@@ -4,6 +4,7 @@ import sys
 import logging
 import re
 from decimal import Decimal
+from pathlib import Path
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -250,13 +251,14 @@ async def _prefetch_prices(session: aiohttp.ClientSession) -> None:
         return_exceptions=True,
     )
 
-async def _build_vol_data(session: aiohttp.ClientSession) -> dict:
+async def _build_vol_data(session: aiohttp.ClientSession, hours: int | None = None) -> dict:
     from src.api.binance_client import fetch_realized_vol
-    vol_hours = getattr(config, "HOURLY_VOL_HOURS", 4)
+    if hours is None:
+        hours = getattr(config, "HOURLY_VOL_HOURS", 4)
 
     symbols = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"]
     results = await asyncio.gather(
-        *(fetch_realized_vol(s, session, hours=vol_hours) for s in symbols),
+        *(fetch_realized_vol(s, session, hours=hours) for s in symbols),
         return_exceptions=True,
     )
     vol_data: dict = {"DEFAULT": 0.40}
@@ -903,6 +905,18 @@ _UPDOWN_HOURLY_SLUG_PREFIXES = {
 }
 _UPDOWN_HOURLY_SKIP_MARKERS = ("-5m-", "-15m-", "-4h-", "updown-5m", "updown-15m", "updown-4h")
 
+# Candle strategy: bitcoin-up-or-down-may-10-2026-12pm-et style
+# Resolves based on whether the named 1h Binance candle is green/red.
+# Strike = candle OPEN = Binance 1h open at (endDate - 1h), NOT event startDate.
+_CANDLE_UPDOWN_SLUG_PREFIXES = {
+    "BTC":  "bitcoin-up-or-down-",
+    "ETH":  "ethereum-up-or-down-",
+    "SOL":  "solana-up-or-down-",
+    "XRP":  "xrp-up-or-down-",
+    "DOGE": "dogecoin-up-or-down-",
+    "BNB":  "bnb-up-or-down-",
+}
+
 async def _scan_updown_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
     import json as _json
     results = []
@@ -1280,6 +1294,99 @@ async def _scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: Gam
 
     return results
 
+async def _scan_updown_candle_markets(
+    session: aiohttp.ClientSession,
+    gamma: GammaClient,
+) -> list[dict]:
+    """
+    Fetch bitcoin-up-or-down-* style markets (1h candle green/red).
+    Strike = Binance 1h candle OPEN at endDate - 1h.
+    Only returns markets where the candle has already started.
+    Uses limit=500 so these markets are not crowded out by 5m/15m events.
+    """
+    import json as _json
+    from datetime import timedelta
+
+    results = []
+    now     = datetime.now(timezone.utc)
+    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
+    max_min = getattr(config, "UPDOWN_HOURLY_MAX_MINUTES", 90)
+    end_min = (now + timedelta(minutes=min_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_max = (now + timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        batch = await gamma._aget(
+            "/events",
+            session,
+            params={
+                "closed":       "false",
+                "limit":        500,
+                "order":        "endDate",
+                "ascending":    "true",
+                "end_date_min": end_min,
+                "end_date_max": end_max,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"[CANDLE UPDOWN] Gagal fetch events: {e}")
+        return results
+
+    if not isinstance(batch, list):
+        return results
+
+    for event in batch:
+        slug = (event.get("slug") or "").lower()
+
+        symbol = None
+        for sym, prefix in _CANDLE_UPDOWN_SLUG_PREFIXES.items():
+            if slug.startswith(prefix):
+                symbol = sym
+                break
+        if not symbol:
+            continue
+
+        end_date_str = event.get("endDate") or ""
+        try:
+            end_date     = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            candle_start = end_date - timedelta(hours=1)
+        except Exception:
+            continue
+
+        # Only trade active candles (candle has started)
+        if candle_start > now:
+            continue
+
+        minutes_left = (end_date - now).total_seconds() / 60
+        if minutes_left < min_min or minutes_left > max_min:
+            continue
+
+        mkts = event.get("markets", [])
+        if not mkts:
+            continue
+        mkt = mkts[0]
+
+        outcomes = mkt.get("outcomes", [])
+        if isinstance(outcomes, str):
+            try: outcomes = _json.loads(outcomes)
+            except: outcomes = []
+        op = mkt.get("outcomePrices", [])
+        if isinstance(op, str):
+            try: op = _json.loads(op)
+            except: op = []
+
+        outcomes_lower = [str(o).lower() for o in outcomes]
+        if "up" not in outcomes_lower or not op:
+            continue
+
+        # _start_date = candle open time (NOT event.startDate which is creation date)
+        mkt["_symbol"]     = symbol
+        mkt["_start_date"] = candle_start.isoformat()
+        mkt["endDate"]     = end_date_str
+        results.append(mkt)
+
+    return results
+
+
 async def _scan_reentry_opportunities(
     clob, sizer, manager, breaker, capital: float,
     session: aiohttp.ClientSession,
@@ -1656,13 +1763,16 @@ async def _analyze_updown_hourly_market(
         if _gbm_decision["action"] != "BUY":
             _raw  = _gbm_decision.get("prob_up_raw", _gbm_decision["prob_up"])
             _bias = _gbm_decision.get("trend_bias", 0.0)
+            _stk  = _gbm_decision.get("strike")
+            _cur  = _gbm_decision.get("current")
+            _stk_str = f" strike={_stk:.2f} cur={_cur:.2f}" if _stk and _cur else ""
             logger.debug(
                 f"[UPDOWN HOURLY] {symbol} GBM skip — "
                 f"P(Up)_raw={_raw:.3f} bias={_bias:+.3f} P(Up)={_gbm_decision['prob_up']:.3f} "
                 f"mkt={market_price_up:.3f} "
                 f"edge_up={_gbm_decision['edge_up']:+.3f} "
-                f"edge_down={_gbm_decision['edge_down']:+.3f} "
-                f"({_gbm_decision['reason']})"
+                f"edge_down={_gbm_decision['edge_down']:+.3f}"
+                f"{_stk_str} ({_gbm_decision['reason']})"
             )
             return
         buy_outcome = _gbm_decision["outcome"]
@@ -2073,6 +2183,400 @@ async def _analyze_updown_hourly_market(
                 strategy = "Up/Down Hourly",
             )
 
+async def _analyze_updown_candle_market(
+    market: dict,
+    clob,
+    gamma,
+    sizer,
+    manager,
+    breaker,
+    capital: float,
+    session: aiohttp.ClientSession,
+    closed_this_cycle: set | None = None,
+    candle_sl_markets: dict | None = None,
+) -> None:
+    """
+    Momentum-based candle strategy. Entry in first 5–15m of candle using 15m
+    BTC momentum (15 × 1m closes). Asymmetric exit: SL at 50% of entry price,
+    profit lock at T1/T2. After SL fires, reverse re-entry if momentum flips.
+    """
+    import json as _json
+    from decimal import Decimal
+    from src.logic.pricing import ke_decimal
+    from src.api.binance_client import fetch_klines
+    from src.models.database import log_prediction
+    from src.logic.reentry import check_candle_reverse_reentry
+
+    symbol = market.get("_symbol", "")
+    if not symbol:
+        return
+
+    condition_id = market.get("conditionId", market.get("id", ""))
+    if closed_this_cycle and condition_id in closed_this_cycle:
+        return
+
+    if _check_symbol_blacklist(symbol):
+        logger.debug(f"[CANDLE UPDOWN] {symbol} blacklisted, skip")
+        return
+
+    # Slot cumulative cap (shared with hourly strategy)
+    end_date_str = market.get("endDate", "")
+    try:
+        end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+    except Exception:
+        return
+
+    max_entries = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", _HOURLY_MAX_ENTRIES_PER_SLOT)
+    if _slot_history_count(end_date) >= max_entries:
+        logger.debug(f"[CANDLE UPDOWN] {symbol} slot penuh ({max_entries}), skip")
+        return
+
+    # Parse outcomes
+    outcomes = market.get("outcomes", [])
+    op       = market.get("outcomePrices", [])
+    if isinstance(outcomes, str):
+        try: outcomes = _json.loads(outcomes)
+        except: outcomes = []
+    if isinstance(op, str):
+        try: op = _json.loads(op)
+        except: op = []
+
+    outcomes_lower = [str(o).lower() for o in outcomes]
+    if "up" not in outcomes_lower or not op:
+        return
+    try:
+        up_idx          = outcomes_lower.index("up")
+        market_price_up = float(op[up_idx])
+    except (ValueError, IndexError):
+        return
+    if not (0.0 < market_price_up < 1.0):
+        return
+
+    start_date_str = market.get("_start_date", "")
+    try:
+        start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
+    except Exception:
+        return
+
+    now           = datetime.now(timezone.utc)
+    t_remaining_s = (end_date - now).total_seconds()
+    if t_remaining_s <= 0:
+        return
+
+    t_min = t_remaining_s / 60.0
+    if t_min < getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5):
+        return
+
+    candle_running_min = (now - start_date).total_seconds() / 60.0
+
+    # Is this a reverse re-entry after SL?
+    sl_outcome         = (candle_sl_markets or {}).get(condition_id)
+    is_reverse_reentry = sl_outcome is not None
+
+    if not is_reverse_reentry:
+        # Initial entry: only in first 5–15m window
+        candle_open_min = getattr(config, "UPDOWN_HOURLY_CANDLE_OPEN_MIN", 5)
+        if candle_running_min < candle_open_min:
+            logger.debug(
+                f"[CANDLE UPDOWN] {symbol} candle baru {candle_running_min:.0f}m jalan, "
+                f"tunggu {candle_open_min}m"
+            )
+            return
+        if candle_running_min > 15:
+            logger.debug(
+                f"[CANDLE UPDOWN] {symbol} candle sudah {candle_running_min:.0f}m, "
+                f"lewat window entry"
+            )
+            return
+
+    # Fetch 15 × 1m klines for momentum signal
+    klines_1m = await fetch_klines(symbol, session, interval="1m", limit=16)
+    if len(klines_1m) < 15:
+        logger.debug(f"[CANDLE UPDOWN] {symbol} 1m klines tidak cukup ({len(klines_1m)})")
+        return
+
+    closes_1m = [float(k[4]) for k in klines_1m[-15:]]
+    if closes_1m[0] <= 0:
+        return
+    momentum_15m = (closes_1m[-1] - closes_1m[0]) / closes_1m[0]
+
+    mom_threshold = getattr(config, "CANDLE_UPDOWN_MOM_THRESHOLD", 0.0015)
+    max_buy_price = getattr(config, "CANDLE_UPDOWN_MAX_BUY_PRICE", 0.60)
+
+    if is_reverse_reentry:
+        market_price_down = round(1.0 - market_price_up, 4)
+        opp_price = market_price_down if sl_outcome == "Up" else market_price_up
+        rev = check_candle_reverse_reentry(
+            sl_outcome            = sl_outcome,
+            momentum_15m          = momentum_15m,
+            minutes_to_resolve    = t_min,
+            market_price_opposite = opp_price,
+            momentum_threshold    = mom_threshold,
+            min_minutes           = getattr(config, "CANDLE_UPDOWN_REVERSE_MIN_MINUTES", 20.0),
+            max_buy_price         = max_buy_price,
+        )
+        if not rev["should_reenter"]:
+            logger.debug(
+                f"[CANDLE UPDOWN REVERSE] {symbol} skip — {rev['reason']} "
+                f"mom={momentum_15m:+.5f}"
+            )
+            return
+        buy_outcome  = rev["outcome"]
+        buy_price    = opp_price
+        is_half_size = True
+        entry_reason = f"REVERSE_{rev['reason']}"
+    else:
+        if momentum_15m > mom_threshold:
+            buy_outcome  = "Up"
+            buy_price    = market_price_up
+        elif momentum_15m < -mom_threshold:
+            buy_outcome  = "Down"
+            buy_price    = round(1.0 - market_price_up, 4)
+        else:
+            logger.debug(
+                f"[CANDLE UPDOWN] {symbol} momentum flat {momentum_15m:+.5f} "
+                f"(threshold ±{mom_threshold:.4f}), skip"
+            )
+            return
+        is_half_size = False
+        entry_reason = f"MOM_{momentum_15m:+.5f}"
+
+    if buy_price > max_buy_price:
+        logger.debug(
+            f"[CANDLE UPDOWN] {symbol} {buy_outcome} price {buy_price:.3f} > "
+            f"max {max_buy_price:.2f}, skip"
+        )
+        return
+
+    if config.CB_ENABLED and not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
+        return
+
+    # Kelly sizing: momentum magnitude as confidence proxy
+    buy_winrate = min(max(0.50 + abs(momentum_15m) * 20.0, 0.50), 0.65)
+    kelly = sizer.calculate(
+        winrate      = buy_winrate,
+        market_price = buy_price,
+        capital      = capital,
+    )
+    if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
+        return
+
+    max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
+    effective_max = max_size * 0.5 if is_half_size else max_size
+    if float(kelly.bet_usdc) > effective_max:
+        from dataclasses import replace as _dc_replace
+        capped_usdc   = Decimal(str(effective_max))
+        capped_shares = (capped_usdc / Decimal(str(buy_price))).quantize(Decimal("0.0001"))
+        kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
+
+    question = market.get("question", market.get("title", f"{symbol} Up or Down"))
+
+    log.info(
+        f"[bold green][CANDLE UPDOWN][/bold green] {symbol} {t_min:.0f}m left | "
+        f"{'REVERSE ' if is_reverse_reentry else ''}BUY {buy_outcome} @ {buy_price:.3f} | "
+        f"mom={momentum_15m:+.5f} ({entry_reason}) winrate={buy_winrate:.2f} | "
+        f"Kelly ${float(kelly.bet_usdc):.2f}"
+    )
+
+    tokens    = gamma.extract_token_ids(market)
+    _bo_lower = buy_outcome.lower()
+    token     = next((t for t in tokens if str(t.get("outcome", "")).lower() == _bo_lower), None)
+    token_id  = str(token["token_id"]) if token and token.get("token_id") else ""
+
+    async with _open_position_lock:
+        can_open, reason = manager.can_open(
+            condition_id  = condition_id,
+            outcome       = buy_outcome,
+            bet_usdc      = kelly.bet_usdc,
+            total_capital = ke_decimal(capital),
+        )
+        if not can_open:
+            logger.debug(f"[CANDLE UPDOWN] Skip {condition_id[:8]} {buy_outcome}: {reason}")
+            return
+
+        try:
+            resolve_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        except Exception:
+            resolve_date = datetime.now(timezone.utc)
+
+        _record_gap  = float(round(momentum_15m, 5))
+        _record_prob = str(round(buy_winrate, 4))
+
+        if config.DRY_RUN:
+            log.warning("[yellow][CANDLE UPDOWN] DRY RUN — simulasi posisi dibuka[/yellow]")
+            manager.open_position(
+                condition_id    = condition_id,
+                question        = question,
+                outcome         = buy_outcome,
+                entry_price     = ke_decimal(buy_price),
+                shares          = kelly.shares,
+                capital_at_risk = kelly.bet_usdc,
+                resolve_date    = resolve_date,
+                gap_pct         = _record_gap,
+                kelly_fraction  = float(kelly.bet_fraction),
+                strategy_mode   = "updown_candle_dry_run",
+                token_id        = "",
+            )
+            log_prediction({
+                "condition_id":   condition_id,
+                "question":       question,
+                "outcome":        buy_outcome,
+                "predicted_prob": _record_prob,
+                "market_price":   str(buy_price),
+                "gap_pct":        str(round(_record_gap * 100, 4)),
+                "resolve_date":   resolve_date.isoformat(),
+            })
+            _record_slot_entry(end_date)
+            if is_reverse_reentry and candle_sl_markets is not None:
+                candle_sl_markets.pop(condition_id, None)
+            alert = get_alert()
+            if alert:
+                await alert.alert_signal(
+                    question = question,
+                    outcome  = buy_outcome,
+                    price    = buy_price,
+                    bet_usdc = float(kelly.bet_usdc),
+                    gap_pct  = _record_gap * 100,
+                    ev       = float(kelly.expected_value),
+                    session  = session,
+                    dry_run  = config.DRY_RUN,
+                    strategy = "Candle Up/Down",
+                )
+        else:
+            if not token_id:
+                logger.warning(f"[CANDLE UPDOWN] token_id tidak ditemukan untuk {buy_outcome}")
+                return
+
+            order = clob.pasang_order(
+                sisi     = SisiOrder.BELI,
+                harga    = ke_decimal(buy_price),
+                ukuran   = kelly.shares,
+                token_id = token_id,
+            )
+            if order:
+                manager.open_position(
+                    condition_id    = condition_id,
+                    question        = question,
+                    outcome         = buy_outcome,
+                    entry_price     = ke_decimal(buy_price),
+                    shares          = kelly.shares,
+                    capital_at_risk = kelly.bet_usdc,
+                    resolve_date    = resolve_date,
+                    gap_pct         = _record_gap,
+                    kelly_fraction  = float(kelly.bet_fraction),
+                    strategy_mode   = "updown_candle",
+                    token_id        = token_id,
+                )
+                log_prediction({
+                    "condition_id":   condition_id,
+                    "question":       question,
+                    "outcome":        buy_outcome,
+                    "predicted_prob": _record_prob,
+                    "market_price":   str(buy_price),
+                    "gap_pct":        str(round(_record_gap * 100, 4)),
+                    "resolve_date":   resolve_date.isoformat(),
+                })
+                _record_slot_entry(end_date)
+                if is_reverse_reentry and candle_sl_markets is not None:
+                    candle_sl_markets.pop(condition_id, None)
+
+                alert = get_alert()
+                if alert:
+                    await alert.alert_signal(
+                        question = question,
+                        outcome  = buy_outcome,
+                        price    = buy_price,
+                        bet_usdc = float(kelly.bet_usdc),
+                        gap_pct  = _record_gap * 100,
+                        ev       = float(kelly.expected_value),
+                        session  = session,
+                        dry_run  = config.DRY_RUN,
+                        strategy = "Candle Up/Down",
+                    )
+            else:
+                logger.warning(f"[CANDLE UPDOWN] {symbol} order gagal")
+
+
+_TARIK_FLAG = Path(__file__).resolve().parent.parent / "data" / "tarik.flag"
+
+
+async def _execute_tarik(
+    manager,
+    clob,
+    session: aiohttp.ClientSession,
+    condition_ids: list[str] | None = None,
+) -> str:
+    """
+    Close specific positions by condition_id (from /tarik N command).
+    condition_ids=None → tutup semua posisi open.
+    Returns summary string for Telegram reply.
+    """
+    from src.models.database import get_open_positions
+    from src.logic.pricing import ke_decimal
+
+    all_positions = get_open_positions()
+    if not all_positions:
+        return "📭 Tidak ada posisi open untuk ditarik."
+
+    if condition_ids:
+        cid_set = set(condition_ids)
+        targets = [p for p in all_positions if p["condition_id"] in cid_set]
+    else:
+        targets = all_positions
+
+    if not targets:
+        return "📭 Posisi yang dipilih tidak ditemukan."
+
+    skipped = len(all_positions) - len(targets)
+
+    results = []
+    for pos in targets:
+        cid      = pos["condition_id"]
+        outcome  = pos["outcome"]
+        current  = float(pos["current_price"])
+        entry    = float(pos["entry_price"])
+        shares   = float(pos["shares"])
+        pnl      = (current - entry) * shares
+        question = pos.get("question", "")[:40]
+
+        # Live: place sell order first
+        if not config.DRY_RUN and pos.get("token_id"):
+            try:
+                clob.pasang_order(
+                    sisi     = SisiOrder.JUAL,
+                    harga    = ke_decimal(str(current)),
+                    ukuran   = ke_decimal(str(shares)),
+                    token_id = str(pos["token_id"]),
+                )
+            except Exception as _e:
+                logger.warning(f"[TARIK] Sell order error {cid[:8]}: {_e}")
+
+        manager._process_exit_manual(
+            condition_id = cid,
+            outcome      = outcome,
+            exit_price   = ke_decimal(str(current)),
+            pnl          = ke_decimal(str(round(pnl, 4))),
+            reason       = "MANUAL_TARIK",
+        )
+        results.append(
+            f"  {'📈' if pnl >= 0 else '📉'} {outcome} @ {current:.3f} | PnL <b>${pnl:+.2f}</b>\n"
+            f"     <i>{question}</i>"
+        )
+        logger.info(f"[TARIK] Closed {cid[:8]} {outcome} @ {current:.3f} PnL=${pnl:+.2f}")
+
+    total_pnl = sum(
+        (float(p["current_price"]) - float(p["entry_price"])) * float(p["shares"])
+        for p in targets
+    )
+    total_emoji = "📈" if total_pnl >= 0 else "📉"
+    mode   = " [DRY RUN]" if config.DRY_RUN else ""
+    header = f"🏁 <b>TARIK {len(targets)} posisi</b>{mode}\n\n"
+    footer = f"\n{total_emoji} Total PnL: <b>${total_pnl:+.2f}</b>"
+    if skipped:
+        footer += f"\n⏭ {skipped} posisi lain dibiarkan jalan"
+    return header + "\n".join(results) + footer
+
+
 async def run_mispricing_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     detector = MispricingDetector(threshold=getattr(config, "HOURLY_MISPRICING_THRESHOLD", 0.12))
@@ -2128,6 +2632,8 @@ async def run_mispricing_mode(clob: ClobClient):
         # condition_id → outcome that was locked (e.g. "Up" or "Down").
         # Used by hourly strategy to allow opposite-direction GBM re-entry.
         _profit_locked_markets: dict[str, str] = {}
+        # condition_id → outcome that was SL'd — triggers reverse re-entry check.
+        _candle_sl_markets: dict[str, str] = {}
         while True:
             try:
                 await _backfill_missing_token_ids(gamma, session)
@@ -2176,6 +2682,24 @@ async def run_mispricing_mode(clob: ClobClient):
                     if _p:
                         _upp(_cid, _out, _p)
 
+                # ── Manual /tarik command from Telegram monitor bot ──────────
+                if _TARIK_FLAG.exists():
+                    try:
+                        _tarik_raw = _TARIK_FLAG.read_text().strip()
+                        _TARIK_FLAG.unlink()
+                        _tarik_cids = [c for c in _tarik_raw.split(",") if c] or None
+                        log.warning(
+                            f"[yellow][TARIK] Flag detected — menutup "
+                            f"{len(_tarik_cids) if _tarik_cids else 'semua'} posisi...[/yellow]"
+                        )
+                        _tarik_summary = await _execute_tarik(manager, clob, session, condition_ids=_tarik_cids)
+                        log.info(f"[TARIK] Done:\n{_tarik_summary}")
+                        _alert = get_alert()
+                        if _alert:
+                            await _alert.send(_tarik_summary, session)
+                    except Exception as _te:
+                        logger.warning(f"[TARIK] Error: {_te}")
+
                 # Evaluate exits — fires profit lock & late-stage SL untuk hourly
                 try:
                     from src.logic.exit_strategy import ExitSignal as _XS
@@ -2199,6 +2723,18 @@ async def run_mispricing_mode(clob: ClobClient):
                             _sym = _detect_symbol_from_question(_d.position.question)
                             if _sym != "UNKNOWN":
                                 _maybe_blacklist_symbol(_sym)
+
+                        # Register reverse re-entry candidate after candle SL
+                        if (_d.signal == _XS.EXIT_CATASTROPHIC
+                                and _d.position.strategy_mode in (
+                                    "updown_candle", "updown_candle_dry_run"
+                                )
+                                and float(_d.estimated_pnl_usdc or 0) < 0):
+                            _candle_sl_markets[_d.position.condition_id] = _d.position.outcome
+                            logger.debug(
+                                f"[CANDLE SL] {_d.position.condition_id[:8]} "
+                                f"{_d.position.outcome} SL'd — queued for reverse re-entry"
+                            )
 
                         # Register re-entry candidate for hourly profit lock
                         if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
@@ -2333,6 +2869,10 @@ async def run_mispricing_mode(clob: ClobClient):
                     hourly_markets = await _scan_updown_hourly_markets(session, gamma)
                     log.info(f"[UPDOWN HOURLY] {len(hourly_markets)} active market")
 
+                    _market_session_label = (
+                        _market_regime["session"]["session"] if _market_regime else "US_MAIN"
+                    )
+
                     # skip_contrarian only applies to legacy contrarian mode.
                     # GBM benefits from trending markets (rides the trend) — bypass gate.
                     _gbm_active = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
@@ -2346,9 +2886,6 @@ async def run_mispricing_mode(clob: ClobClient):
                             f"(score {_market_regime['trend_score']} ≥ threshold)"
                         )
                     else:
-                        _market_session_label = (
-                            _market_regime["session"]["session"] if _market_regime else "US_MAIN"
-                        )
                         for hm in hourly_markets:
                             try:
                                 await _analyze_updown_hourly_market(
@@ -2371,6 +2908,21 @@ async def run_mispricing_mode(clob: ClobClient):
                                 btc_scalp=_btc_scalp,
                                 symbol_momentum_map=symbol_momentum_map,
                             )
+
+                    # ── Candle strategy: bitcoin-up-or-down-* (1h candle green/red) ──
+                    if getattr(config, "CANDLE_UPDOWN_ENABLED", True):
+                        candle_markets = await _scan_updown_candle_markets(session, gamma)
+                        log.info(f"[CANDLE UPDOWN] {len(candle_markets)} active candle market")
+                        for cm in candle_markets:
+                            try:
+                                await _analyze_updown_candle_market(
+                                    cm, clob, gamma, sizer, manager,
+                                    breaker, capital, session,
+                                    closed_this_cycle=closed_this_cycle,
+                                    candle_sl_markets=_candle_sl_markets,
+                                )
+                            except Exception as _ce:
+                                logger.warning(f"[CANDLE UPDOWN] Error analyze {cm.get('_symbol','?')}: {_ce}")
 
             except asyncio.CancelledError:
                 raise

@@ -145,8 +145,58 @@ class ExitEvaluator:
     _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
     _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
     _HOURLY_STRATEGIES = {"updown_hourly", "updown_hourly_dry_run"}
+    _CANDLE_STRATEGIES = {"updown_candle", "updown_candle_dry_run"}
 
-    def evaluate(self, pos: Position) -> ExitDecision:
+    def evaluate(self, pos: Position, candle_early_sl_pct: float = 0.50) -> ExitDecision:
+        # Candle strategy: simple early price-based SL (50% of entry), then profit lock.
+        if pos.strategy_mode in self._CANDLE_STRATEGIES:
+            pnl_pct = float(pos.unrealized_pnl_pct)
+            mins    = pos.minutes_to_resolve
+
+            # Early SL: exit when current price drops to ≤ 50% of entry
+            sl_floor = float(pos.entry_price) * (1.0 - candle_early_sl_pct)
+            if float(pos.current_price) <= sl_floor:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=(
+                        f"Candle SL: {pnl_pct:.0f}% "
+                        f"(cur {float(pos.current_price):.3f} ≤ "
+                        f"floor {sl_floor:.3f})"
+                    ),
+                )
+
+            # Profit lock: reuse hourly T1/T2 thresholds
+            if pnl_pct >= self.hourly_lock_t1_pct and mins > self.hourly_lock_t1_min_remaining:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Candle T1 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+            if pnl_pct >= self.hourly_lock_t2_pct and mins > self.hourly_lock_t2_min_remaining:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Candle T2 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+
+            return ExitDecision(
+                signal=ExitSignal.HOLD,
+                should_exit=False,
+                position=pos,
+                estimated_pnl_usdc=self._calc_pnl(pos),
+                reason=f"Candle hold | PnL {pnl_pct:+.0f}% | {mins:.0f}m left",
+            )
+
         if pos.strategy_mode in self._HOURLY_STRATEGIES:
             pnl_pct = float(pos.unrealized_pnl_pct)
             mins = pos.minutes_to_resolve

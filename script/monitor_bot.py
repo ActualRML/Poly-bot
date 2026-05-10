@@ -22,12 +22,16 @@ load_dotenv(_ROOT / ".env.secret")
 load_dotenv(_ROOT / ".env.local")
 load_dotenv(_ROOT / ".env")
 
+from pathlib import Path
+
 from src.models.database import (
     get_open_positions,
     get_trade_history,
     get_stats,
     count_open_positions,
 )
+
+_TARIK_FLAG = _ROOT / "data" / "tarik.flag"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -224,7 +228,7 @@ def build_positions() -> str:
     total_cap = 0.0
     total_unrl = 0.0
 
-    for pos in positions:
+    for i, pos in enumerate(positions, 1):
         entry   = float(pos["entry_price"])
         current = float(pos["current_price"])
         shares  = float(pos["shares"])
@@ -244,13 +248,13 @@ def build_positions() -> str:
         else:
             status = "➡️"
 
-        q_short = html.escape(pos["question"][:52])
+        q_short = html.escape(pos["question"][:48])
         outcome = html.escape(str(pos["outcome"]))
         resolve_label = _resolve_label(pos.get("resolve_date", ""), now)
 
         lines.append(
-            f"\n{status} <b>{q_short}</b>\n"
-            f"   {outcome} @ {entry:.3f} → {current:.3f} (edge {edge:.1f}%)\n"
+            f"\n<b>{i}.</b> {status} <b>{q_short}</b>\n"
+            f"   {outcome} @ {entry:.3f} → {current:.3f}\n"
             f"   PnL: <b>${pnl_pos:+.2f}</b> ({pnl_pct:+.1f}%) | "
             f"Cap ${capital:.2f} | ⏳ {resolve_label}"
         )
@@ -259,6 +263,9 @@ def build_positions() -> str:
     lines.append(f"At risk    : ${total_cap:.2f}")
     unrl_emoji = "📈" if total_unrl >= 0 else "📉"
     lines.append(f"Unrealized : {unrl_emoji} <b>${total_unrl:+.2f}</b>")
+    now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
+    lines.append(f"\n<i>Data per {now_wib.strftime('%H:%M:%S')} WIB — harga update tiap ~30 detik</i>")
+    lines.append("<i>Gunakan /tarik 1 3 untuk tutup posisi nomor 1 dan 3</i>")
     return "\n".join(lines)
 
 
@@ -299,6 +306,48 @@ def build_trades(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
+def build_tarik_flag(indices: list[int]) -> str:
+    """
+    indices: 1-based position numbers from /tarik args.
+    Writes selected condition_ids to flag file.
+    """
+    positions = get_open_positions()
+    if not positions:
+        return "📭 Tidak ada posisi open."
+
+    # Validate indices
+    valid = [i for i in indices if 1 <= i <= len(positions)]
+    if not valid:
+        listed = "\n".join(
+            f"  {i}. {p['outcome']} — {p['question'][:40]}"
+            for i, p in enumerate(positions, 1)
+        )
+        return f"❌ Nomor posisi tidak valid (1–{len(positions)}).\n\n{listed}"
+
+    targets = [positions[i - 1] for i in valid]
+    condition_ids = ",".join(p["condition_id"] for p in targets)
+    _TARIK_FLAG.write_text(condition_ids)
+
+    now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
+    lines = [
+        f"🏁 <b>TARIK {len(targets)} posisi</b> — flag dikirim\n"
+        f"<i>Harga per {now_wib.strftime('%H:%M:%S')} WIB (mungkin beda dari /positions)</i>\n"
+    ]
+    for p in targets:
+        entry   = float(p["entry_price"])
+        current = float(p["current_price"])
+        shares  = float(p["shares"])
+        pnl     = (current - entry) * shares
+        emoji   = "📈" if pnl >= 0 else "📉"
+        lines.append(
+            f"  {emoji} {p['outcome']} @ {entry:.3f} → <b>{current:.3f}</b> | "
+            f"PnL <b>${pnl:+.2f}</b>\n"
+            f"     <i>{p['question'][:40]}</i>"
+        )
+    lines.append("\n⏳ Eksekusi oleh bot utama di cycle berikutnya (~30 detik)")
+    return "\n".join(lines)
+
+
 def build_help() -> str:
     return (
         "🤖 <b>POLYMARKET BOT — COMMANDS</b>\n\n"
@@ -307,6 +356,9 @@ def build_help() -> str:
         "/stats       — portfolio summary\n"
         "/trades      — 10 trades terakhir\n"
         "/trades 20   — 20 trades terakhir (max 50)\n"
+        "/tarik 1     — tutup posisi #1 (lihat /positions untuk nomornya)\n"
+        "/tarik 1 3   — tutup posisi #1 dan #3\n"
+        "/tarik       — tutup semua posisi\n"
         "/ping        — cek bot alive\n"
         "/help        — list command\n"
     )
@@ -395,6 +447,17 @@ class MonitorBot:
                 except ValueError:
                     limit = 10
                 reply = build_trades(limit=limit)
+            elif cmd == "/tarik":
+                nums = []
+                for tok in arg.split():
+                    try:
+                        nums.append(int(tok))
+                    except ValueError:
+                        pass
+                if not nums:
+                    # No args → close all
+                    nums = list(range(1, 6))
+                reply = build_tarik_flag(nums)
             else:
                 reply = f"❓ Unknown command: <code>{html.escape(cmd)}</code>\n\n" + build_help()
         except Exception as e:
