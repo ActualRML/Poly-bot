@@ -41,7 +41,7 @@ _CG_BAN_COOLDOWN    = 120
 
 # ── Hourly slot history (cumulative entries per resolve slot) ────────────────
 _hourly_slot_history: dict[str, int] = {}
-_HOURLY_MAX_ENTRIES_PER_SLOT = 3  # cumulative cap (open + closed in same session)
+_HOURLY_MAX_ENTRIES_PER_SLOT = 5  # default; overridden by config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT
 
 def _slot_key(end_date: datetime) -> str:
     return end_date.replace(second=0, microsecond=0).isoformat()
@@ -1535,6 +1535,14 @@ async def _analyze_updown_hourly_market(
         )
         return
 
+    # Min T floor: GBM probabilities are unreliable at very short T (sigma*sqrt(T) too small)
+    _min_t_min = getattr(config, "UPDOWN_HOURLY_MIN_T_MINUTES", 20)
+    if delta_sec < _min_t_min * 60:
+        logger.debug(
+            f"[UPDOWN HOURLY] {symbol} {delta_sec/60:.1f}m tersisa < {_min_t_min}m floor — skip"
+        )
+        return
+
     # Track Polymarket price for stagnation detection
     _track_market_price(condition_id, market_price_up)
 
@@ -1548,10 +1556,11 @@ async def _analyze_updown_hourly_market(
             f"{slot_open_count}/{max_per_slot} OPEN di slot {end_date.strftime('%H:%M')} UTC"
         )
         return
-    if slot_history >= _HOURLY_MAX_ENTRIES_PER_SLOT:
+    _max_entries = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", _HOURLY_MAX_ENTRIES_PER_SLOT)
+    if slot_history >= _max_entries:
         logger.debug(
             f"[UPDOWN HOURLY] Skip {symbol} — "
-            f"{slot_history}/{_HOURLY_MAX_ENTRIES_PER_SLOT} CUMULATIVE entries "
+            f"{slot_history}/{_max_entries} CUMULATIVE entries "
             f"di slot {end_date.strftime('%H:%M')} UTC (slot exhausted)"
         )
         return
@@ -1634,6 +1643,8 @@ async def _analyze_updown_hourly_market(
                 session         = session,
                 fee             = config.UPDOWN_HOURLY_FEE,
                 min_edge        = config.UPDOWN_HOURLY_GBM_MIN_EDGE,
+                max_edge        = getattr(config, "UPDOWN_HOURLY_GBM_MAX_EDGE", 0.25),
+                use_trend_bias  = getattr(config, "UPDOWN_HOURLY_USE_TREND_BIAS", True),
             )
         except Exception as _e:
             logger.warning(f"[UPDOWN HOURLY] {symbol} GBM eval error: {_e}")
@@ -1643,9 +1654,12 @@ async def _analyze_updown_hourly_market(
             logger.debug(f"[UPDOWN HOURLY] {symbol} — strike/current price unavailable, skip")
             return
         if _gbm_decision["action"] != "BUY":
+            _raw  = _gbm_decision.get("prob_up_raw", _gbm_decision["prob_up"])
+            _bias = _gbm_decision.get("trend_bias", 0.0)
             logger.debug(
                 f"[UPDOWN HOURLY] {symbol} GBM skip — "
-                f"P(Up)={_gbm_decision['prob_up']:.3f} mkt={market_price_up:.3f} "
+                f"P(Up)_raw={_raw:.3f} bias={_bias:+.3f} P(Up)={_gbm_decision['prob_up']:.3f} "
+                f"mkt={market_price_up:.3f} "
                 f"edge_up={_gbm_decision['edge_up']:+.3f} "
                 f"edge_down={_gbm_decision['edge_down']:+.3f} "
                 f"({_gbm_decision['reason']})"
@@ -1660,6 +1674,159 @@ async def _analyze_updown_hourly_market(
         else:
             buy_outcome = "Up"
             buy_price   = market_price_up
+
+    # Market consensus floor: never bet against 90%+ market conviction.
+    # When market prices one outcome at <10%, thousands of traders already agree
+    # it's nearly impossible. GBM edge vs this is almost always spurious (T too short).
+    _consensus_thr = getattr(config, "UPDOWN_HOURLY_CONSENSUS_FLOOR", 0.90)
+    if buy_outcome == "Down" and market_price_up > _consensus_thr:
+        logger.debug(
+            f"[UPDOWN HOURLY] Skip {symbol} Down — market {market_price_up:.3f} "
+            f"consensus Up (>{_consensus_thr:.0%})"
+        )
+        return
+    if buy_outcome == "Up" and market_price_up < (1.0 - _consensus_thr):
+        logger.debug(
+            f"[UPDOWN HOURLY] Skip {symbol} Up — market {market_price_up:.3f} "
+            f"consensus Down (<{1.0-_consensus_thr:.0%})"
+        )
+        return
+
+    # ── Technical signal gate (RSI, Z-score, Binance volume spike) ────────────
+    if use_gbm and getattr(config, "UPDOWN_HOURLY_USE_TECHNICAL", True):
+        from src.api.binance_client import fetch_technical_signals as _fetch_tech
+        _tech_rsi_p = getattr(config, "UPDOWN_HOURLY_RSI_PERIOD", 14)
+        _tech_z_w   = getattr(config, "UPDOWN_HOURLY_ZSCORE_WINDOW", 20)
+        _tech_sp_m  = getattr(config, "UPDOWN_HOURLY_VOL_SPIKE_MULT", 3.0)
+        _tech_tr_h  = getattr(config, "UPDOWN_HOURLY_MACRO_TREND_HOURS", 4)
+        _tech = await _fetch_tech(
+            symbol, session,
+            rsi_period     = _tech_rsi_p,
+            zscore_window  = _tech_z_w,
+            vol_spike_mult = _tech_sp_m,
+            trend_hours    = _tech_tr_h,
+        )
+        if _tech:  # empty dict = fetch failed → skip filter, don't block
+            _rsi   = _tech.get("rsi")
+            _z     = _tech.get("zscore")
+            _spike = _tech.get("vol_spike", False)
+            _rsi_ob = getattr(config, "UPDOWN_HOURLY_RSI_OVERBOUGHT", 70.0)
+            _rsi_os = getattr(config, "UPDOWN_HOURLY_RSI_OVERSOLD", 30.0)
+            _z_thr  = getattr(config, "UPDOWN_HOURLY_ZSCORE_THR", 2.5)
+
+            # Hard block: Binance volume spike = market in turbulent mode
+            if _spike:
+                logger.debug(f"[UPDOWN HOURLY] {symbol} — Binance vol spike, GBM unreliable, skip")
+                return
+
+            # RSI exhaustion: don't chase an already-exhausted move
+            if _rsi is not None:
+                if buy_outcome == "Up" and _rsi >= _rsi_ob:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — RSI {_rsi:.1f} overbought, skip Up (reversal risk)"
+                    )
+                    return
+                if buy_outcome == "Down" and _rsi <= _rsi_os:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — RSI {_rsi:.1f} oversold, skip Down (bounce risk)"
+                    )
+                    return
+
+            # Z-score extreme: price at tail of 24h distribution → mean-reversion risk
+            if _z is not None and _z_thr > 0:
+                if buy_outcome == "Up" and _z >= _z_thr:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — Z={_z:.2f} far above 24h mean, skip Up"
+                    )
+                    return
+                if buy_outcome == "Down" and _z <= -_z_thr:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — Z={_z:.2f} far below 24h mean, skip Down"
+                    )
+                    return
+
+            # Momentum alignment: RSI shows prevailing trend → don't bet against it.
+            # Different from the exhaustion filter above (which is mean-reversion).
+            # Here: RSI > 65 means uptrend ongoing → Down bet is counter-trend → skip.
+            _rsi_mom_ob = getattr(config, "UPDOWN_HOURLY_RSI_MOM_OB", 65.0)
+            _rsi_mom_os = getattr(config, "UPDOWN_HOURLY_RSI_MOM_OS", 35.0)
+            if _rsi is not None:
+                if buy_outcome == "Down" and _rsi >= _rsi_mom_ob:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — RSI {_rsi:.1f} uptrend, skip Down (momentum alignment)"
+                    )
+                    return
+                if buy_outcome == "Up" and _rsi <= _rsi_mom_os:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — RSI {_rsi:.1f} downtrend, skip Up (momentum alignment)"
+                    )
+                    return
+
+            # Z-score momentum: price trending away from mean → don't fight the direction.
+            # Threshold lower than mean-reversion (1.5 vs 2.5) — catches mid-range trend.
+            _z_mom_thr = getattr(config, "UPDOWN_HOURLY_ZSCORE_MOM_THR", 1.5)
+            if _z is not None and _z_mom_thr > 0:
+                if buy_outcome == "Down" and _z >= _z_mom_thr:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — Z={_z:.2f} uptrend vs 24h mean, skip Down"
+                    )
+                    return
+                if buy_outcome == "Up" and _z <= -_z_mom_thr:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — Z={_z:.2f} downtrend vs 24h mean, skip Up"
+                    )
+                    return
+
+            # Macro trend gate: use BTC 4h trend as the primary macro signal.
+            # On strongly trending days, counter-trend bets almost always lose.
+            if getattr(config, "UPDOWN_HOURLY_MACRO_TREND_GATE", True):
+                _macro_thr = getattr(config, "UPDOWN_HOURLY_MACRO_TREND_THR", 0.02)
+                if _macro_thr > 0:
+                    if symbol != "BTC":
+                        _btc_tech = await _fetch_tech(
+                            "BTC", session,
+                            rsi_period     = _tech_rsi_p,
+                            zscore_window  = _tech_z_w,
+                            vol_spike_mult = _tech_sp_m,
+                            trend_hours    = _tech_tr_h,
+                        )
+                    else:
+                        _btc_tech = _tech
+                    _btc_trend = (_btc_tech or {}).get("trend_4h") or 0.0
+                    if _btc_trend > _macro_thr and buy_outcome == "Down":
+                        logger.debug(
+                            f"[UPDOWN HOURLY] {symbol} — BTC 4h trend {_btc_trend:+.2%} UP, "
+                            f"skip Down (macro trend gate)"
+                        )
+                        return
+                    if _btc_trend < -_macro_thr and buy_outcome == "Up":
+                        logger.debug(
+                            f"[UPDOWN HOURLY] {symbol} — BTC 4h trend {_btc_trend:+.2%} DOWN, "
+                            f"skip Up (macro trend gate)"
+                        )
+                        return
+
+            logger.debug(
+                f"[UPDOWN HOURLY] {symbol} tech OK — RSI={_rsi} Z={_z} "
+                f"trend={_tech.get('trend_4h', 0):.2%} spike={_spike}"
+                if _tech.get("trend_4h") is not None else
+                f"[UPDOWN HOURLY] {symbol} tech OK — RSI={_rsi} Z={_z} spike={_spike}"
+            )
+
+    # ── BTC-lead correlation (altcoins follow BTC direction) ──────────────────
+    _btc_corr_thr = getattr(config, "UPDOWN_HOURLY_BTC_CORR_THR", 0.005)
+    if use_gbm and symbol != "BTC" and _btc_corr_thr > 0 and symbol_momentum_map:
+        _btc_mtf = symbol_momentum_map.get("BTC")
+        if _btc_mtf is not None:
+            _btc_15m = _btc_mtf.get("m_15m", 0.0) or 0.0
+            if abs(_btc_15m) >= _btc_corr_thr:
+                _btc_dir = "Up" if _btc_15m > 0 else "Down"
+                if _btc_dir != buy_outcome:
+                    logger.debug(
+                        f"[UPDOWN HOURLY] {symbol} — BTC 15m {_btc_15m:+.3%} → {_btc_dir}, "
+                        f"opposes {buy_outcome}, skip (BTC lead)"
+                    )
+                    return
 
     # ── Opposite-only enforcement for profit-locked markets ──
     if locked_outcome is not None:
@@ -1819,6 +1986,12 @@ async def _analyze_updown_hourly_market(
             if _gbm_decision is not None
             else abs(btc_regime or 0.0)
         )
+        # predicted_prob: store actual GBM prob_up (not scalp confidence used for Kelly sizing)
+        _record_prob = (
+            str(round(_gbm_decision["prob_up"], 4))
+            if _gbm_decision is not None
+            else str(round(buy_winrate, 4))
+        )
 
         if config.DRY_RUN:
             log.warning("[yellow][UPDOWN HOURLY] DRY RUN — simulasi posisi dibuka[/yellow]")
@@ -1839,7 +2012,7 @@ async def _analyze_updown_hourly_market(
                 "condition_id":   condition_id,
                 "question":       question,
                 "outcome":        buy_outcome,
-                "predicted_prob": str(round(buy_winrate, 4)),
+                "predicted_prob": _record_prob,
                 "market_price":   str(buy_price),
                 "gap_pct":        str(round(_record_gap * 100, 2)),
                 "resolve_date":   resolve_date.isoformat(),
@@ -1875,7 +2048,7 @@ async def _analyze_updown_hourly_market(
                     "condition_id":   condition_id,
                     "question":       question,
                     "outcome":        buy_outcome,
-                    "predicted_prob": str(round(buy_winrate, 4)),
+                    "predicted_prob": _record_prob,
                     "market_price":   str(buy_price),
                     "gap_pct":        str(round(_record_gap * 100, 2)),
                     "resolve_date":   resolve_date.isoformat(),

@@ -54,7 +54,7 @@ Skip: 5m dan 15m markets.
 - `P(Up) = gbm_prob_above(current, strike, vol_annual, T_remaining)` (closed-form GBM)
 - `edge_up   = P(Up)     - market_price_up   - fee`
 - `edge_down = (1-P(Up)) - market_price_down - fee`
-- Pick side dengan edge ≥ `UPDOWN_HOURLY_GBM_MIN_EDGE` (default 5%), else SKIP
+- Pick side dengan edge ≥ `UPDOWN_HOURLY_GBM_MIN_EDGE` (default 3%), else SKIP
 - Toggle `UPDOWN_HOURLY_USE_GBM=false` → fallback ke contrarian lama
 
 **Filter stack** (tiap entry harus lolos semua):
@@ -171,7 +171,7 @@ Setelah validasi 30+ trades, enable lagi sebelum live.
 | Priority | Task |
 |---|---|
 | 🔴 | Pantau 30+ trade hourly GBM, validasi winrate ≥ 60% & edge realisasi ≈ edge predicted |
-| 🟡 | Tune `UPDOWN_HOURLY_GBM_MIN_EDGE` (default 0.05) — drop ke 0.03 kalau entry < 5/hari |
+| 🟢 | ~~Tune `UPDOWN_HOURLY_GBM_MIN_EDGE`~~ — sudah di-drop ke 0.03 (entry terlalu sedikit) |
 | 🟡 | Cek log VOL per cycle — pastikan semua 6 symbol fetch OK (jangan fallback ke DEFAULT 40%) |
 | 🟡 | Fix CB: cari kenapa `starting_capital` kadang berubah ke `current_capital` |
 | 🟡 | Setup cron recalibrate di VPS |

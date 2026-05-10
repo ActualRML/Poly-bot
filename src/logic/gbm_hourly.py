@@ -107,67 +107,80 @@ def pick_gbm_direction(
     market_price_up: float,
     fee: float = 0.018,
     min_edge: float = 0.05,
+    max_edge: float = 0.25,
+    trend_bias: float = 0.0,
 ) -> dict:
     """
     Pure function: pick direction (Up/Down/skip) from GBM probability vs market.
+
+    `trend_bias` shifts prob_up before edge calculation (range [-0.10, +0.10]).
+    Positive bias = bullish (EMA uptrend), negative = bearish.
 
     Returns dict with keys:
       - action      : "BUY" | "SKIP"
       - outcome     : "Up" | "Down" | None
       - buy_price   : market price of the chosen outcome (None if skip)
       - edge        : signed edge of the chosen side (or best abs edge if skip)
-      - edge_up     : P(Up) - market_price_up - fee
-      - edge_down   : (1 - P(Up)) - (1 - market_price_up) - fee
+      - edge_up     : P(Up)_biased - market_price_up - fee
+      - edge_down   : (1 - P(Up)_biased) - (1 - market_price_up) - fee
       - reason      : short label for logging
+      - prob_up_raw : original GBM probability before bias
+      - trend_bias  : bias value applied
     """
     if not (0.0 <= prob_up <= 1.0):
         return {
             "action": "SKIP", "outcome": None, "buy_price": None,
             "edge": 0.0, "edge_up": 0.0, "edge_down": 0.0,
             "reason": "INVALID_PROB",
+            "prob_up_raw": prob_up, "trend_bias": trend_bias,
         }
     if not (0.0 < market_price_up < 1.0):
         return {
             "action": "SKIP", "outcome": None, "buy_price": None,
             "edge": 0.0, "edge_up": 0.0, "edge_down": 0.0,
             "reason": "INVALID_MARKET_PRICE",
+            "prob_up_raw": prob_up, "trend_bias": trend_bias,
         }
+
+    prob_up_raw    = prob_up
+    prob_up_biased = round(min(max(prob_up + trend_bias, 0.01), 0.99), 4)
 
     market_price_down = 1.0 - market_price_up
 
-    edge_up   = prob_up           - market_price_up   - fee
-    edge_down = (1.0 - prob_up)   - market_price_down - fee
+    edge_up   = prob_up_biased           - market_price_up   - fee
+    edge_down = (1.0 - prob_up_biased)   - market_price_down - fee
+
+    _base = {
+        "edge_up": round(edge_up, 4),
+        "edge_down": round(edge_down, 4),
+        "prob_up_raw": round(prob_up_raw, 4),
+        "trend_bias": round(trend_bias, 3),
+    }
 
     # Pick the side with the larger edge; both can't be ≥ min_edge
     # simultaneously since edge_up + edge_down = 1 - market_up - market_down - 2·fee
     # = -2·fee (when market sums to 1). So at most one passes the gate.
     if edge_up >= min_edge and edge_up >= edge_down:
-        return {
-            "action": "BUY", "outcome": "Up",
-            "buy_price": round(market_price_up, 4),
-            "edge": round(edge_up, 4),
-            "edge_up": round(edge_up, 4),
-            "edge_down": round(edge_down, 4),
-            "reason": "MODEL_UNDERPRICES_UP",
-        }
+        # Edge cap: extreme edge = GBM overconfident (T too short + large S/K deviation).
+        # When T < 1h, even 1% price move above strike pushes prob_up to 90%+.
+        # Market pricing at 46% is more reliable than GBM at that point.
+        if edge_up > max_edge:
+            return {"action": "SKIP", "outcome": None, "buy_price": None,
+                    "edge": round(edge_up, 4), "reason": "EDGE_TOO_HIGH_UNRELIABLE", **_base}
+        return {"action": "BUY", "outcome": "Up",
+                "buy_price": round(market_price_up, 4),
+                "edge": round(edge_up, 4), "reason": "MODEL_UNDERPRICES_UP", **_base}
     if edge_down >= min_edge:
-        return {
-            "action": "BUY", "outcome": "Down",
-            "buy_price": round(market_price_down, 4),
-            "edge": round(edge_down, 4),
-            "edge_up": round(edge_up, 4),
-            "edge_down": round(edge_down, 4),
-            "reason": "MODEL_OVERPRICES_UP",
-        }
+        if edge_down > max_edge:
+            return {"action": "SKIP", "outcome": None, "buy_price": None,
+                    "edge": round(edge_down, 4), "reason": "EDGE_TOO_HIGH_UNRELIABLE", **_base}
+        return {"action": "BUY", "outcome": "Down",
+                "buy_price": round(market_price_down, 4),
+                "edge": round(edge_down, 4), "reason": "MODEL_OVERPRICES_UP", **_base}
 
     best_abs = max(abs(edge_up), abs(edge_down))
-    return {
-        "action": "SKIP", "outcome": None, "buy_price": None,
-        "edge": round(best_abs, 4),
-        "edge_up": round(edge_up, 4),
-        "edge_down": round(edge_down, 4),
-        "reason": "EDGE_BELOW_MIN",
-    }
+    return {"action": "SKIP", "outcome": None, "buy_price": None,
+            "edge": round(best_abs, 4), "reason": "EDGE_BELOW_MIN", **_base}
 
 
 # ── Convenience wrapper that combines I/O + decision ──────────────────────────
@@ -181,7 +194,9 @@ async def evaluate_hourly_entry(
     session: aiohttp.ClientSession,
     fee: float = 0.018,
     min_edge: float = 0.05,
+    max_edge: float = 0.25,
     current_price: Optional[float] = None,
+    use_trend_bias: bool = True,
 ) -> Optional[dict]:
     """
     End-to-end GBM entry evaluator. Returns a decision dict (see
@@ -189,8 +204,9 @@ async def evaluate_hourly_entry(
     None when strike or current price is unavailable.
 
     `current_price` may be passed in to avoid a redundant Binance fetch.
+    `use_trend_bias` enables EMA-based probability adjustment (6h+24h EMA).
     """
-    from src.api.binance_client import fetch_price
+    from src.api.binance_client import fetch_price, fetch_trend_bias
 
     now = datetime.now(timezone.utc)
     delta_sec = (end_date - now).total_seconds()
@@ -206,17 +222,27 @@ async def evaluate_hourly_entry(
     if not strike or strike <= 0:
         return None
 
-    prob_up = gbm_prob_above(current_price, strike, vol_annual, delta_sec)
+    trend_bias = 0.0
+    if use_trend_bias:
+        try:
+            trend_bias = await fetch_trend_bias(symbol, session)
+        except Exception as _e:
+            logger.debug(f"[GBM] {symbol} trend_bias fetch failed: {_e}")
+
+    prob_up_raw = gbm_prob_above(current_price, strike, vol_annual, delta_sec)
     decision = pick_gbm_direction(
-        prob_up=prob_up,
+        prob_up=prob_up_raw,
         market_price_up=market_price_up,
         fee=fee,
         min_edge=min_edge,
+        max_edge=max_edge,
+        trend_bias=trend_bias,
     )
+    prob_up_biased = round(min(max(prob_up_raw + trend_bias, 0.01), 0.99), 4)
     decision.update({
         "current":   current_price,
         "strike":    strike,
-        "prob_up":   round(prob_up, 4),
+        "prob_up":   prob_up_biased,   # biased — what drove the direction decision
         "T_seconds": delta_sec,
         "vol":       vol_annual,
     })

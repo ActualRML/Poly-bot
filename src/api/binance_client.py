@@ -29,6 +29,10 @@ _vol_cache: dict[str, float] = {}
 _vol_cache_time: dict[str, float] = {}
 _VOL_TTL = 300
 
+_tech_cache: dict[str, dict] = {}
+_tech_cache_time: dict[str, float] = {}
+_TECH_TTL = 60  # 1 min — technical signals refresh each minute
+
 _ban_until: float = 0.0
 _BAN_COOLDOWN = 300
 
@@ -351,6 +355,91 @@ async def fetch_realized_vol(
         _vol_cache_time[cache_key] = now
         logger.info(f"[BINANCE] {symbol} realized vol {hours}h = {vol:.1%} (annualized)")
         return vol
+
+async def fetch_technical_signals(
+    symbol: str,
+    session: aiohttp.ClientSession,
+    rsi_period: int = 14,
+    zscore_window: int = 20,
+    vol_spike_mult: float = 3.0,
+    trend_hours: int = 4,
+) -> dict:
+    """
+    Returns RSI, Z-score, volume-spike, and trend from 1h Binance klines.
+    Cached for _TECH_TTL seconds. Returns {} on fetch failure (caller skips filter).
+    """
+    from src.logic.technical import compute_rsi, compute_zscore, detect_volume_spike, compute_trend
+
+    symbol = symbol.upper()
+    now = datetime.now(timezone.utc).timestamp()
+    cache_key = f"{symbol}_tech_{rsi_period}_{zscore_window}_{trend_hours}"
+
+    if cache_key in _tech_cache and now - _tech_cache_time.get(cache_key, 0) < _TECH_TTL:
+        return _tech_cache[cache_key]
+
+    _check_rate_auto_reset()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        return _tech_cache.get(cache_key) or {}
+
+    limit = max(zscore_window, rsi_period, trend_hours) + 3
+    klines = await fetch_klines_extended(symbol, session, interval="1h", limit=limit)
+    if not klines:
+        return {}
+
+    closes  = [k[4] for k in klines]
+    volumes = [k[5] for k in klines] if len(klines[0]) > 5 else []
+
+    result: dict = {
+        "rsi":       compute_rsi(closes, rsi_period),
+        "zscore":    compute_zscore(closes, zscore_window),
+        "vol_spike": detect_volume_spike(volumes, vol_spike_mult) if volumes else False,
+        "trend_4h":  compute_trend(closes, trend_hours),
+    }
+    _tech_cache[cache_key] = result
+    _tech_cache_time[cache_key] = now
+    logger.debug(
+        f"[BINANCE] {symbol} tech — RSI={result['rsi']} Z={result['zscore']} "
+        f"trend={result['trend_4h']:.2%} spike={result['vol_spike']}"
+        if result.get("trend_4h") is not None else
+        f"[BINANCE] {symbol} tech — RSI={result['rsi']} Z={result['zscore']} spike={result['vol_spike']}"
+    )
+    return result
+
+
+async def fetch_trend_bias(
+    symbol: str,
+    session: aiohttp.ClientSession,
+) -> float:
+    """
+    Fetch 28 bars of 1h klines and return EMA-based trend bias in [-0.10, +0.10].
+    Returns 0.0 on fetch failure (neutral — no bias applied).
+    """
+    from src.logic.technical import compute_trend_bias as _ctb
+
+    symbol = symbol.upper()
+    cache_key = f"{symbol}_trend_bias"
+    now = datetime.now(timezone.utc).timestamp()
+
+    if cache_key in _tech_cache and now - _tech_cache_time.get(cache_key, 0) < _TECH_TTL:
+        cached = _tech_cache[cache_key]
+        return cached.get("bias", 0.0)
+
+    _check_rate_auto_reset()
+    if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
+        cached = _tech_cache.get(cache_key) or {}
+        return cached.get("bias", 0.0)
+
+    klines = await fetch_klines_extended(symbol, session, interval="1h", limit=28)
+    if not klines or len(klines) < 25:
+        return 0.0
+
+    closes = [k[4] for k in klines]
+    bias = _ctb(closes)
+    _tech_cache[cache_key] = {"bias": bias}
+    _tech_cache_time[cache_key] = now
+    logger.debug(f"[BINANCE] {symbol} trend_bias={bias:+.3f}")
+    return bias
+
 
 async def fetch_historical_realized_vol(
     symbol: str,

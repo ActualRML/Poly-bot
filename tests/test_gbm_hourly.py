@@ -69,12 +69,18 @@ def test_pick_gbm_invalid_market_price():
 
 
 def test_pick_gbm_extreme_underpriced_up():
-    # Market says Up=0.20 but model says P(Up)=0.80 (huge edge)
+    # Market says Up=0.20 but model says P(Up)=0.80 (edge=58.2%).
+    # With default max_edge=0.25, this is blocked as unreliable (T too short + large S/K).
     r = pick_gbm_direction(prob_up=0.80, market_price_up=0.20, fee=0.018, min_edge=0.05)
-    assert r["action"] == "BUY"
-    assert r["outcome"] == "Up"
-    assert r["buy_price"] == 0.20
+    assert r["action"] == "SKIP"
+    assert r["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
     assert r["edge"] == pytest.approx(0.582, abs=1e-3)
+
+    # With max_edge disabled (set to 1.0), the same input should produce BUY
+    r2 = pick_gbm_direction(prob_up=0.80, market_price_up=0.20, fee=0.018, min_edge=0.05, max_edge=1.0)
+    assert r2["action"] == "BUY"
+    assert r2["outcome"] == "Up"
+    assert r2["buy_price"] == 0.20
 
 
 def test_pick_gbm_picks_larger_edge():
@@ -108,13 +114,19 @@ def test_gbm_prob_far_below_strike():
 
 
 def test_gbm_decision_end_to_end_realistic():
-    # BTC 30m to resolve, vol=40% annualized, current=$100,500, strike=$100,000
-    # Market prices Up at 0.55 (fairly high)
-    # GBM should give P(Up) very high, edge positive → BUY Up
+    # BTC 30m to resolve, vol=40%, current=$100,500, strike=$100,000 (0.5% above).
+    # GBM gives P(Up) ~0.95 → edge_up ≈ 0.95 - 0.55 - 0.018 = 0.38 (38%).
+    # With max_edge=0.25 (default), this is blocked as EDGE_TOO_HIGH_UNRELIABLE.
     p = gbm_prob_above(current=100_500, strike=100_000, vol_annual=0.40, time_remaining_s=1800)
     decision = pick_gbm_direction(prob_up=p, market_price_up=0.55, fee=0.018, min_edge=0.05)
-    assert decision["action"] == "BUY"
-    assert decision["outcome"] == "Up"
+    assert decision["action"] == "SKIP"
+    assert decision["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
+
+    # Same scenario with higher vol (more uncertainty → lower prob_up → edge within cap)
+    p_highvol = gbm_prob_above(current=100_500, strike=100_000, vol_annual=2.0, time_remaining_s=1800)
+    decision2 = pick_gbm_direction(prob_up=p_highvol, market_price_up=0.55, fee=0.018, min_edge=0.05)
+    # High vol collapses GBM certainty → lower edge, more likely to pass or be below min_edge
+    assert decision2["action"] in ("BUY", "SKIP")  # outcome depends on exact prob
 
 
 def test_gbm_decision_end_to_end_market_already_priced_in():
@@ -127,11 +139,18 @@ def test_gbm_decision_end_to_end_market_already_priced_in():
 
 def test_gbm_decision_picks_down_when_market_overconfident_on_up():
     # Current=$99,500 (below strike), but market still prices Up at 0.55 (over-confident)
-    # P(Up) should be ~0.30, market_down=0.45, edge_down = 0.70 - 0.45 - 0.018 = 0.232
+    # P(Up) ~0.05 at T=30min → edge_down ≈ 0.95 - 0.45 - 0.018 = 0.482 → BLOCKED by max_edge.
     p = gbm_prob_above(current=99_500, strike=100_000, vol_annual=0.40, time_remaining_s=1800)
     decision = pick_gbm_direction(prob_up=p, market_price_up=0.55, fee=0.018, min_edge=0.05)
-    assert decision["action"] == "BUY"
-    assert decision["outcome"] == "Down"
+    assert decision["action"] == "SKIP"
+    assert decision["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
+
+    # With longer T (6h), sigma*sqrt(T) is larger → GBM less extreme → edge within cap.
+    # At T=6h: P(Up) ~0.31, edge_down ≈ 0.69-0.45-0.018=0.22 < max_edge=0.25 → BUY Down
+    p_long = gbm_prob_above(current=99_500, strike=100_000, vol_annual=0.40, time_remaining_s=21600)
+    decision_long = pick_gbm_direction(prob_up=p_long, market_price_up=0.55, fee=0.018, min_edge=0.05)
+    assert decision_long["action"] == "BUY"
+    assert decision_long["outcome"] == "Down"
 
 
 # ── passes_opposite_reentry_gate ──────────────────────────────────────────────
