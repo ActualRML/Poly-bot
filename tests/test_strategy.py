@@ -5,11 +5,6 @@ from hypothesis import given, strategies as st
 
 from src.logic.strategy import get_dynamic_threshold, should_force_exit, MIN_THRESHOLD, MAX_THRESHOLD
 
-
-# ==============================================================================
-# get_dynamic_threshold
-# ==============================================================================
-
 def test_threshold_uses_asset_vol():
     result = get_dynamic_threshold("BTC", {"BTC": 0.40})
     expected = max(MIN_THRESHOLD, min(MAX_THRESHOLD, 0.40 / math.sqrt(24) * 1.5))
@@ -42,11 +37,6 @@ def test_threshold_always_in_bounds(vol):
     result = get_dynamic_threshold("BTC", {"BTC": vol})
     assert MIN_THRESHOLD <= result <= MAX_THRESHOLD
 
-
-# ==============================================================================
-# should_force_exit
-# ==============================================================================
-
 def test_force_exit_true_when_under_buffer():
     expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
     assert should_force_exit(expiry) is True
@@ -68,3 +58,4 @@ def test_force_exit_custom_buffer():
     expiry = datetime.now(timezone.utc) + timedelta(minutes=20)
     assert should_force_exit(expiry, buffer_minutes=30) is True
     assert should_force_exit(expiry, buffer_minutes=10) is False
+

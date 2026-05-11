@@ -43,3 +43,8 @@ data/.*_cache.json
 .idea/
 .DS_Store
 Thumbs.db
+
+# Node (ruflo tooling, not part of project)
+node_modules/
+package-lock.json
+package.json

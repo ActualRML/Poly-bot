@@ -50,3 +50,4 @@ def test_strong_edge_produces_bet():
 def test_bet_capped_at_max_fraction():
     r = sizer.calculate(0.99, 0.01, 1000.0)
     assert float(r.bet_usdc) <= 1000.0 * float(sizer.max_fraction) + 0.01
+

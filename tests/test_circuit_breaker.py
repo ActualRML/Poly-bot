@@ -5,13 +5,11 @@ from hypothesis import HealthCheck
 
 from src.logic.circuit_breaker import CircuitBreaker
 
-
 @pytest.fixture
 def cb(tmp_path, monkeypatch):
     state_file = tmp_path / "circuit_breaker.json"
     monkeypatch.setattr("src.logic.circuit_breaker.STATE_FILE", state_file)
     return CircuitBreaker(starting_capital=100.0)
-
 
 def test_initial_state_allows_trade(cb):
     assert cb.check().can_trade
@@ -92,3 +90,4 @@ def test_safety_thresholds_never_crash(current_vol, daily_drawdown, tmp_path, mo
     breaker = CircuitBreaker(starting_capital=100.0)
     status = breaker.check_safety_thresholds(current_vol, daily_drawdown)
     assert isinstance(status.halt_new_entries, bool)
+

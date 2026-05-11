@@ -55,3 +55,4 @@ def test_three_consecutive_wins_increase_size():
 
 def test_empty_trades_returns_base():
     assert calculate_position_size([]) == BASE_POSITION_USDC
+

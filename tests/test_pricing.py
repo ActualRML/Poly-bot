@@ -89,3 +89,4 @@ def test_pnl_sign_matches_direction(buy, sell, qty):
 def test_spread_raises_on_inverted():
     with pytest.raises(ValueError):
         hitung_spread(Decimal("0.60"), Decimal("0.50"))
+

@@ -6,7 +6,6 @@ from src.api.gamma_client import GammaClient
 
 client = GammaClient()
 
-
 def _make_market(
     closed=False,
     active=True,
@@ -32,7 +31,6 @@ def _make_market(
         "events": [{"seriesSlug": series_slug}] if series_slug else [],
     }
 
-
 def _make_daily_market(
     days_from_now=5,
     volume=15000.0,
@@ -54,11 +52,6 @@ def _make_daily_market(
         "endDate": end_date.isoformat(),
         "events": [{"seriesSlug": series_slug}] if series_slug else [],
     }
-
-
-# ==============================================================================
-# _filter_markets_hourly
-# ==============================================================================
 
 def test_hourly_good_market_passes():
     m = _make_market()
@@ -123,11 +116,6 @@ def test_hourly_non_sports_slug_passes():
     result = client._filter_markets_hourly([m], 500, 200, 90, 5)
     assert len(result) == 1
 
-
-# ==============================================================================
-# _filter_markets (daily)
-# ==============================================================================
-
 def test_daily_good_market_passes():
     result = client._filter_markets([_make_daily_market()], 10000, 5000, 30, 1)
     assert len(result) == 1
@@ -161,11 +149,6 @@ def test_daily_adds_days_to_resolve():
 def test_daily_empty_list():
     assert client._filter_markets([], 10000, 5000, 30, 1) == []
 
-
-# ==============================================================================
-# get_token_prices (static)
-# ==============================================================================
-
 def test_get_token_prices_list_inputs():
     market = {"outcomes": ["Yes", "No"], "outcomePrices": ["0.75", "0.25"]}
     prices = GammaClient.get_token_prices(market)
@@ -195,11 +178,6 @@ def test_get_token_prices_invalid_price_returns_none():
     prices = GammaClient.get_token_prices(market)
     assert prices["Yes"] is None
     assert abs(prices["No"] - 0.40) < 1e-9
-
-
-# ==============================================================================
-# extract_token_ids (static)
-# ==============================================================================
 
 def test_extract_token_ids_list_inputs():
     market = {
@@ -250,3 +228,4 @@ def test_extract_token_ids_carries_condition_id():
     tokens = GammaClient.extract_token_ids(market)
     assert tokens[0]["condition_id"] == "0xcondition"
     assert tokens[0]["market_slug"] == "test-market"
+

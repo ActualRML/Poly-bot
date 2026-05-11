@@ -1,5 +1,7 @@
 # Polymarket Trading Bot
 
+@STRATEGY_MISTAKES.md
+
 ## Token Saving (CRITICAL)
 
 - **Zero filler**: Jangan "I understand", "Based on the code", "Let me know if..." — langsung action.
@@ -54,7 +56,9 @@ Skip: 5m dan 15m markets.
 - `P(Up) = gbm_prob_above(current, strike, vol_annual, T_remaining)` (closed-form GBM)
 - `edge_up   = P(Up)     - market_price_up   - fee`
 - `edge_down = (1-P(Up)) - market_price_down - fee`
-- Pick side dengan edge ≥ `UPDOWN_HOURLY_GBM_MIN_EDGE` (default 3%), else SKIP
+- Pick side dengan edge ≥ `adj_min_edge`, else SKIP
+  `adj_min_edge = max(UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual × UPDOWN_GBM_VOL_EDGE_FACTOR)`
+  e.g. DOGE (100%) → 10%, BNB (56%) → 5.6%, BTC (44%) → 4.4%
 - Toggle `UPDOWN_HOURLY_USE_GBM=false` → fallback ke contrarian lama
 
 **Filter stack** (tiap entry harus lolos semua):
@@ -76,8 +80,8 @@ Skip: 5m dan 15m markets.
 **`gap_pct` recorded di DB**: GBM mode → realized edge (e.g. 0.08 = 8%); contrarian mode → BTC 15m momentum (legacy).
 
 **Sizing**:
-- `buy_winrate = clamp(scalp.confidence, 0.50, 0.75)` (dari scalping signal)
-- Kelly bet × `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg)
+- `buy_winrate = clamp(GBM prob_up, 0.50, 0.80)` — sisi yang dibeli (Up→prob_up, Down→1−prob_up); fallback 0.55 kalau GBM disabled
+- Kelly bet × `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; ×1.2 mom aligned, ×0.75 mom opposed)
 - Asia session: cap kelly_multiplier ke 0.7
 
 ---
@@ -93,6 +97,9 @@ Skip: 5m dan 15m markets.
 | T2 | ≥ 150% | > 15m left (substantial profit) |
 
 Selain itu → HOLD ke resolve untuk full payout.
+
+**Exit alerts**: setiap exit (TP maupun SL) kirim `alert_exit` ke Telegram + `log.info [EXIT]` ke terminal.
+Format log: `[EXIT] ✅/❌ {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 
 ### Late-Stage SL (exclusive bands, threshold makin lenient dekat resolve)
 | Band | Time range | Threshold |
@@ -171,7 +178,9 @@ Setelah validasi 30+ trades, enable lagi sebelum live.
 | Priority | Task |
 |---|---|
 | 🔴 | Pantau 30+ trade hourly GBM, validasi winrate ≥ 60% & edge realisasi ≈ edge predicted |
-| 🟢 | ~~Tune `UPDOWN_HOURLY_GBM_MIN_EDGE`~~ — sudah di-drop ke 0.03 (entry terlalu sedikit) |
+| 🟢 | ~~Feed GBM `prob_up` ke Kelly winrate~~ — sudah aktif (`buy_winrate = clamp(prob_up, 0.50, 0.80)`) |
+| 🟢 | ~~Tune `UPDOWN_HOURLY_GBM_MIN_EDGE`~~ — vol-adj threshold sudah aktif (DOGE→10%, BTC→4.4%) |
+| 🟢 | ~~Exit Telegram alerts~~ — done, setiap exit (TP/SL) kirim alert ke bot |
 | 🟡 | Cek log VOL per cycle — pastikan semua 6 symbol fetch OK (jangan fallback ke DEFAULT 40%) |
 | 🟡 | Fix CB: cari kenapa `starting_capital` kadang berubah ke `current_capital` |
 | 🟡 | Setup cron recalibrate di VPS |

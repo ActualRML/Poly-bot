@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 from src.api.clob_client import ClobClient
 from src.models.types import SisiOrder, StatusOrder
 
-
 @pytest.fixture
 def fake_clob_types():
     """Inject a fake py_clob_client.clob_types into sys.modules so tests run
@@ -23,11 +22,6 @@ def fake_clob_types():
         sys.modules.pop("py_clob_client.clob_types", None)
     else:
         sys.modules["py_clob_client.clob_types"] = old
-
-
-# ==============================================================================
-# pasang_order — DRY_RUN=True
-# ==============================================================================
 
 def test_pasang_order_dry_run_returns_order():
     client = ClobClient()
@@ -58,11 +52,6 @@ def test_pasang_order_dry_run_no_token_id_returns_order():
         order = client.pasang_order(SisiOrder.JUAL, Decimal("0.80"), Decimal("5.0"), None)
     assert order is not None
     assert order.market_id == ""
-
-
-# ==============================================================================
-# pasang_order — DRY_RUN=False
-# ==============================================================================
 
 def test_pasang_order_live_not_connected_returns_none():
     client = ClobClient()
@@ -109,11 +98,6 @@ def test_pasang_order_live_exception_returns_none(fake_clob_types):
         result = client.pasang_order(SisiOrder.BELI, Decimal("0.65"), Decimal("10.0"), "tok_001")
     assert result is None
 
-
-# ==============================================================================
-# get_balance
-# ==============================================================================
-
 def test_get_balance_not_connected_returns_zero():
     client = ClobClient()
     client._terhubung = False
@@ -148,11 +132,6 @@ def test_get_balance_returns_float_direct(fake_clob_types):
     mock_clob.get_balance_allowance.return_value = 75.0
     client._client = mock_clob
     assert client.get_balance() == pytest.approx(75.0)
-
-
-# ==============================================================================
-# ambil_snapshot
-# ==============================================================================
 
 def test_ambil_snapshot_none_token_id_returns_none():
     assert ClobClient().ambil_snapshot(None) is None
@@ -219,3 +198,4 @@ def test_ambil_snapshot_exception_returns_none():
     mock_clob.get_order_book.side_effect = Exception("API error")
     client._client = mock_clob
     assert client.ambil_snapshot("tok_001") is None
+

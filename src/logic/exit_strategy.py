@@ -5,6 +5,23 @@ from enum import Enum
 from typing import Optional
 
 from src.logic.pricing import ke_decimal, validasi_harga
+from src.utils.config import config
+
+import math as _math
+import re as _re
+
+_SYMBOL_VOL: dict[str, float] = {
+    "BTC": 0.44, "ETH": 0.55, "BNB": 0.56,
+    "XRP": 0.60, "SOL": 0.70, "DOGE": 1.00,
+}
+_VOL_BTC_BASELINE = 0.44
+
+def _vol_scale_from_question(question: str) -> float:
+    m = _re.search(r'\b(BTC|ETH|SOL|BNB|XRP|DOGE)\b', question.upper())
+    if not m:
+        return 1.0
+    vol = _SYMBOL_VOL.get(m.group(1), _VOL_BTC_BASELINE)
+    return _math.sqrt(vol / _VOL_BTC_BASELINE)
 
 class ExitSignal(Enum):
     HOLD             = "hold"
@@ -112,9 +129,9 @@ class ExitEvaluator:
         # Profit lock for hourly — fire pada profit besar, otherwise hold to resolve.
         # T1 (≥200%): near-max ITM, kunci kapan saja >5m left
         # T2 (≥150%): substantial profit, kunci kalau masih banyak waktu (>15m)
-        hourly_lock_t1_pct: float = 200.0,
+        hourly_lock_t1_pct: float = 150.0,
         hourly_lock_t1_min_remaining: float = 5.0,
-        hourly_lock_t2_pct: float = 150.0,
+        hourly_lock_t2_pct: float = 100.0,
         hourly_lock_t2_min_remaining: float = 15.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
@@ -153,7 +170,10 @@ class ExitEvaluator:
             pnl_pct = float(pos.unrealized_pnl_pct)
             mins    = pos.minutes_to_resolve
 
-            # Early SL: exit when current price drops to ≤ 50% of entry
+            # Vol-scaling (same formula as hourly): DOGE scale=1.51, BTC=1.0
+            _cscale = _vol_scale_from_question(pos.question) if getattr(config, "UPDOWN_HOURLY_VOL_SL_SCALE", True) else 1.0
+            # SL: higher vol → more lenient floor
+            candle_early_sl_pct = min(candle_early_sl_pct * _cscale, 0.90)
             sl_floor = float(pos.entry_price) * (1.0 - candle_early_sl_pct)
             if float(pos.current_price) <= sl_floor:
                 return ExitDecision(
@@ -169,8 +189,12 @@ class ExitEvaluator:
                     ),
                 )
 
-            # Profit lock: reuse hourly T1/T2 thresholds
-            if pnl_pct >= self.hourly_lock_t1_pct and mins > self.hourly_lock_t1_min_remaining:
+            # Profit lock: vol-scaled — DOGE locks at lower PnL, wider time gate
+            _clock_t1_pct     = max(self.hourly_lock_t1_pct     / _cscale, 80.0)
+            _clock_t2_pct     = max(self.hourly_lock_t2_pct     / _cscale, 60.0)
+            _clock_t1_min_rem = self.hourly_lock_t1_min_remaining * _cscale
+            _clock_t2_min_rem = self.hourly_lock_t2_min_remaining * _cscale
+            if pnl_pct >= _clock_t1_pct and mins > _clock_t1_min_rem:
                 return ExitDecision(
                     signal=ExitSignal.EXIT_LOCK_PROFIT,
                     should_exit=True,
@@ -179,7 +203,7 @@ class ExitEvaluator:
                     suggested_exit_price=pos.current_price,
                     reason=f"Candle T1 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
                 )
-            if pnl_pct >= self.hourly_lock_t2_pct and mins > self.hourly_lock_t2_min_remaining:
+            if pnl_pct >= _clock_t2_pct and mins > _clock_t2_min_rem:
                 return ExitDecision(
                     signal=ExitSignal.EXIT_LOCK_PROFIT,
                     should_exit=True,
@@ -201,6 +225,18 @@ class ExitEvaluator:
             pnl_pct = float(pos.unrealized_pnl_pct)
             mins = pos.minutes_to_resolve
 
+            # Per-coin vol-scaling: scale = sqrt(vol / vol_BTC), e.g. DOGE=1.51, BTC=1.0
+            _scale = _vol_scale_from_question(pos.question) if getattr(config, "UPDOWN_HOURLY_VOL_SL_SCALE", True) else 1.0
+            # SL: higher vol → more lenient (multiply threshold → bigger negative)
+            _t1_pct = max(self.hourly_late_sl_t1_pct * _scale, -95.0)
+            _t2_pct = max(self.hourly_late_sl_t2_pct * _scale, -80.0)
+            _t3_pct = max(self.hourly_late_sl_t3_pct * _scale, -60.0)
+            # TP: higher vol → lock sooner (lower PnL threshold, wider time gate)
+            _lock_t1_pct     = max(self.hourly_lock_t1_pct     / _scale, 80.0)
+            _lock_t2_pct     = max(self.hourly_lock_t2_pct     / _scale, 60.0)
+            _lock_t1_min_rem = self.hourly_lock_t1_min_remaining * _scale
+            _lock_t2_min_rem = self.hourly_lock_t2_min_remaining * _scale
+
             # Tiered late-stage SL with EXCLUSIVE bands (no overlap).
             # Threshold tumbuh seiring mendekati resolve karena slippage + result decided.
             #
@@ -208,7 +244,7 @@ class ExitEvaluator:
             # T2 (5-10m,  MIDDLE): PnL ≤ -50%
             # T1 (0-5m,   INNER):  PnL ≤ -70%  → only extreme, slippage too costly otherwise
             if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
-                    and pnl_pct <= self.hourly_late_sl_t3_pct):
+                    and pnl_pct <= _t3_pct):
                 return ExitDecision(
                     signal=ExitSignal.EXIT_CATASTROPHIC,
                     should_exit=True,
@@ -218,7 +254,7 @@ class ExitEvaluator:
                     reason=f"Late-SL OUTER: {pnl_pct:.0f}% with {mins:.0f}m left",
                 )
             if (self.hourly_late_sl_t1_max_remaining < mins <= self.hourly_late_sl_t2_max_remaining
-                    and pnl_pct <= self.hourly_late_sl_t2_pct):
+                    and pnl_pct <= _t2_pct):
                 return ExitDecision(
                     signal=ExitSignal.EXIT_CATASTROPHIC,
                     should_exit=True,
@@ -228,7 +264,7 @@ class ExitEvaluator:
                     reason=f"Late-SL MIDDLE: {pnl_pct:.0f}% with {mins:.0f}m left",
                 )
             if (mins <= self.hourly_late_sl_t1_max_remaining
-                    and pnl_pct <= self.hourly_late_sl_t1_pct):
+                    and pnl_pct <= _t1_pct):
                 return ExitDecision(
                     signal=ExitSignal.EXIT_CATASTROPHIC,
                     should_exit=True,
@@ -238,8 +274,8 @@ class ExitEvaluator:
                     reason=f"Late-SL INNER: {pnl_pct:.0f}% with {mins:.0f}m left",
                 )
 
-            # T1 (≥200%): near-max ITM — kunci kapan saja >5m left
-            if pnl_pct >= self.hourly_lock_t1_pct and mins > self.hourly_lock_t1_min_remaining:
+            # T1: near-max ITM — vol-scaled: DOGE locks at 132% if >7.6m left
+            if pnl_pct >= _lock_t1_pct and mins > _lock_t1_min_rem:
                 return ExitDecision(
                     signal=ExitSignal.EXIT_LOCK_PROFIT,
                     should_exit=True,
@@ -248,8 +284,8 @@ class ExitEvaluator:
                     suggested_exit_price=pos.current_price,
                     reason=f"T1 lock: +{pnl_pct:.0f}% with {mins:.0f}m left",
                 )
-            # T2 (≥150%): substantial profit — lock kalau masih banyak waktu reversal
-            if pnl_pct >= self.hourly_lock_t2_pct and mins > self.hourly_lock_t2_min_remaining:
+            # T2: substantial profit — vol-scaled: DOGE locks at 99% if >22.7m left
+            if pnl_pct >= _lock_t2_pct and mins > _lock_t2_min_rem:
                 return ExitDecision(
                     signal=ExitSignal.EXIT_LOCK_PROFIT,
                     should_exit=True,

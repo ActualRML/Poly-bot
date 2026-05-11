@@ -5,14 +5,12 @@ from unittest.mock import patch
 
 import src.models.database as db_mod
 
-
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
     db_path = tmp_path / "test_manager.db"
     monkeypatch.setattr(db_mod, "DB_PATH", db_path)
     from src.logic.manager import PositionManager
     return PositionManager()
-
 
 def _make_row(
     condition_id="0xabc",
@@ -46,11 +44,6 @@ def _make_row(
         "token_id": token_id,
     }
 
-
-# ==============================================================================
-# _row_to_position
-# ==============================================================================
-
 def test_row_to_position_aware_datetime(manager):
     pos = manager._row_to_position(_make_row(), Decimal("0.65"))
     assert pos.resolve_date.tzinfo is not None
@@ -75,11 +68,6 @@ def test_row_to_position_fields_correct(manager):
 def test_row_to_position_highest_price(manager):
     pos = manager._row_to_position(_make_row(highest_price="0.80"), Decimal("0.70"))
     assert pos.highest_price == Decimal("0.80")
-
-
-# ==============================================================================
-# can_open
-# ==============================================================================
 
 def test_can_open_allows_new_position(manager):
     with (
@@ -111,7 +99,6 @@ def test_can_open_blocks_oversized_bet(manager):
         patch("src.logic.manager.get_position_by_market", return_value=None),
         patch("src.logic.manager.count_open_positions", return_value=0),
     ):
-        # $40 / $100 = 40% > max 30%
         ok, reason = manager.can_open("0xnew", "Yes", Decimal("40"), Decimal("100"))
     assert ok is False
     assert "%" in reason
@@ -121,7 +108,6 @@ def test_can_open_allows_at_max_pct(manager):
         patch("src.logic.manager.get_position_by_market", return_value=None),
         patch("src.logic.manager.count_open_positions", return_value=0),
     ):
-        # $30 / $100 = 30% == max 30% → allowed
         ok, _ = manager.can_open("0xnew", "Yes", Decimal("30"), Decimal("100"))
     assert ok is True
 
@@ -132,11 +118,6 @@ def test_can_open_skips_pct_check_when_zero_capital(manager):
     ):
         ok, _ = manager.can_open("0xnew", "Yes", Decimal("50"), Decimal("0"))
     assert ok is True
-
-
-# ==============================================================================
-# get_unrealized_pnl
-# ==============================================================================
 
 def test_get_unrealized_pnl_positive(manager):
     with patch("src.logic.manager.get_open_positions", return_value=[{
@@ -166,5 +147,5 @@ def test_get_unrealized_pnl_multiple_positions(manager):
         {"entry_price": "0.50", "current_price": "0.40", "shares": "5.0"},
     ]):
         pnl = manager.get_unrealized_pnl()
-    # (0.70-0.60)*10 + (0.40-0.50)*5 = 1.0 - 0.5 = 0.5
     assert pnl == pytest.approx(0.5)
+

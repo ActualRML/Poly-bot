@@ -69,3 +69,4 @@ def test_invalid_inputs_return_zero_prob():
     assert r.probability == 0.0
     r2 = calc.calculate("BTC", 80000.0, 80000.0, 0, volatility=0.40)
     assert r2.probability == 0.0
+

@@ -6,12 +6,7 @@ import pytest
 from src.logic.gbm_hourly import pick_gbm_direction, passes_opposite_reentry_gate
 from src.logic.oracle_arb import gbm_prob_above
 
-
-# ── pick_gbm_direction (pure) ─────────────────────────────────────────────────
-
 def test_pick_gbm_buy_up_when_model_underprices():
-    # Model says P(Up)=0.65, market prices Up at 0.50
-    # edge_up = 0.65 - 0.50 - 0.018 = 0.132 → BUY Up
     r = pick_gbm_direction(prob_up=0.65, market_price_up=0.50, fee=0.018, min_edge=0.05)
     assert r["action"] == "BUY"
     assert r["outcome"] == "Up"
@@ -19,11 +14,7 @@ def test_pick_gbm_buy_up_when_model_underprices():
     assert r["edge"] == pytest.approx(0.132, abs=1e-3)
     assert r["reason"] == "MODEL_UNDERPRICES_UP"
 
-
 def test_pick_gbm_buy_down_when_model_overprices():
-    # Model says P(Up)=0.30, market prices Up at 0.50
-    # P(Down)=0.70, market_price_down=0.50
-    # edge_down = 0.70 - 0.50 - 0.018 = 0.182 → BUY Down
     r = pick_gbm_direction(prob_up=0.30, market_price_up=0.50, fee=0.018, min_edge=0.05)
     assert r["action"] == "BUY"
     assert r["outcome"] == "Down"
@@ -31,26 +22,17 @@ def test_pick_gbm_buy_down_when_model_overprices():
     assert r["edge"] == pytest.approx(0.182, abs=1e-3)
     assert r["reason"] == "MODEL_OVERPRICES_UP"
 
-
 def test_pick_gbm_skip_when_model_agrees_with_market():
-    # P(Up)=0.51, market=0.50 → tiny edge, fee eats it
-    # edge_up = 0.51 - 0.50 - 0.018 = -0.008
-    # edge_down = 0.49 - 0.50 - 0.018 = -0.028
     r = pick_gbm_direction(prob_up=0.51, market_price_up=0.50, fee=0.018, min_edge=0.05)
     assert r["action"] == "SKIP"
     assert r["outcome"] is None
     assert r["reason"] == "EDGE_BELOW_MIN"
 
-
 def test_pick_gbm_skip_when_edge_below_threshold():
-    # P(Up)=0.55, market=0.50, fee=0
-    # edge_up = 0.55 - 0.50 - 0 = 0.05 — exactly at threshold (not < min_edge)
     r = pick_gbm_direction(prob_up=0.55, market_price_up=0.50, fee=0.0, min_edge=0.05)
     assert r["action"] == "BUY"  # ≥ min_edge passes
-    # bump to require strictly above
     r2 = pick_gbm_direction(prob_up=0.54, market_price_up=0.50, fee=0.0, min_edge=0.05)
     assert r2["action"] == "SKIP"
-
 
 def test_pick_gbm_invalid_prob():
     r = pick_gbm_direction(prob_up=-0.1, market_price_up=0.5)
@@ -60,103 +42,67 @@ def test_pick_gbm_invalid_prob():
     assert r2["action"] == "SKIP"
     assert r2["reason"] == "INVALID_PROB"
 
-
 def test_pick_gbm_invalid_market_price():
     for bad in (0.0, 1.0, -0.5, 1.5):
         r = pick_gbm_direction(prob_up=0.5, market_price_up=bad)
         assert r["action"] == "SKIP"
         assert r["reason"] == "INVALID_MARKET_PRICE"
 
-
 def test_pick_gbm_extreme_underpriced_up():
-    # Market says Up=0.20 but model says P(Up)=0.80 (edge=58.2%).
-    # With default max_edge=0.25, this is blocked as unreliable (T too short + large S/K).
     r = pick_gbm_direction(prob_up=0.80, market_price_up=0.20, fee=0.018, min_edge=0.05)
     assert r["action"] == "SKIP"
     assert r["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
     assert r["edge"] == pytest.approx(0.582, abs=1e-3)
 
-    # With max_edge disabled (set to 1.0), the same input should produce BUY
     r2 = pick_gbm_direction(prob_up=0.80, market_price_up=0.20, fee=0.018, min_edge=0.05, max_edge=1.0)
     assert r2["action"] == "BUY"
     assert r2["outcome"] == "Up"
     assert r2["buy_price"] == 0.20
 
-
 def test_pick_gbm_picks_larger_edge():
-    # Both edge_up and edge_down can't simultaneously beat threshold
-    # (edge_up + edge_down = -2·fee when market sums to 1) — verify the larger one wins
     r = pick_gbm_direction(prob_up=0.40, market_price_up=0.55, fee=0.0, min_edge=0.0)
-    # edge_up   = 0.40 - 0.55 - 0   = -0.15
-    # edge_down = 0.60 - 0.45 - 0   = +0.15
     assert r["action"] == "BUY"
     assert r["outcome"] == "Down"
 
-
-# ── Integration with gbm_prob_above ───────────────────────────────────────────
-
 def test_gbm_prob_at_strike_returns_half():
-    # Current == strike → P(Up) ≈ 0.5 (with negligible drift adjustment)
     p = gbm_prob_above(current=100.0, strike=100.0, vol_annual=0.40, time_remaining_s=3600)
     assert 0.45 <= p <= 0.55
 
-
 def test_gbm_prob_far_above_strike():
-    # Current 5% above strike with 30 min left, vol 40% — should be > 0.85
     p = gbm_prob_above(current=105.0, strike=100.0, vol_annual=0.40, time_remaining_s=1800)
     assert p > 0.85
 
-
 def test_gbm_prob_far_below_strike():
-    # Current 5% below strike with 30 min left
     p = gbm_prob_above(current=95.0, strike=100.0, vol_annual=0.40, time_remaining_s=1800)
     assert p < 0.15
 
-
 def test_gbm_decision_end_to_end_realistic():
-    # BTC 30m to resolve, vol=40%, current=$100,500, strike=$100,000 (0.5% above).
-    # GBM gives P(Up) ~0.95 → edge_up ≈ 0.95 - 0.55 - 0.018 = 0.38 (38%).
-    # With max_edge=0.25 (default), this is blocked as EDGE_TOO_HIGH_UNRELIABLE.
     p = gbm_prob_above(current=100_500, strike=100_000, vol_annual=0.40, time_remaining_s=1800)
     decision = pick_gbm_direction(prob_up=p, market_price_up=0.55, fee=0.018, min_edge=0.05)
     assert decision["action"] == "SKIP"
     assert decision["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
 
-    # Same scenario with higher vol (more uncertainty → lower prob_up → edge within cap)
     p_highvol = gbm_prob_above(current=100_500, strike=100_000, vol_annual=2.0, time_remaining_s=1800)
     decision2 = pick_gbm_direction(prob_up=p_highvol, market_price_up=0.55, fee=0.018, min_edge=0.05)
-    # High vol collapses GBM certainty → lower edge, more likely to pass or be below min_edge
     assert decision2["action"] in ("BUY", "SKIP")  # outcome depends on exact prob
 
-
 def test_gbm_decision_end_to_end_market_already_priced_in():
-    # Same setup but market already prices Up at 0.92 — no edge left
     p = gbm_prob_above(current=100_500, strike=100_000, vol_annual=0.40, time_remaining_s=1800)
     decision = pick_gbm_direction(prob_up=p, market_price_up=0.92, fee=0.018, min_edge=0.05)
-    # If P(Up)≈0.93 vs market 0.92, edge_up ≈ 0.93 - 0.92 - 0.018 = -0.008 → skip
     assert decision["action"] == "SKIP"
 
-
 def test_gbm_decision_picks_down_when_market_overconfident_on_up():
-    # Current=$99,500 (below strike), but market still prices Up at 0.55 (over-confident)
-    # P(Up) ~0.05 at T=30min → edge_down ≈ 0.95 - 0.45 - 0.018 = 0.482 → BLOCKED by max_edge.
     p = gbm_prob_above(current=99_500, strike=100_000, vol_annual=0.40, time_remaining_s=1800)
     decision = pick_gbm_direction(prob_up=p, market_price_up=0.55, fee=0.018, min_edge=0.05)
     assert decision["action"] == "SKIP"
     assert decision["reason"] == "EDGE_TOO_HIGH_UNRELIABLE"
 
-    # With longer T (6h), sigma*sqrt(T) is larger → GBM less extreme → edge within cap.
-    # At T=6h: P(Up) ~0.31, edge_down ≈ 0.69-0.45-0.018=0.22 < max_edge=0.25 → BUY Down
     p_long = gbm_prob_above(current=99_500, strike=100_000, vol_annual=0.40, time_remaining_s=21600)
     decision_long = pick_gbm_direction(prob_up=p_long, market_price_up=0.55, fee=0.018, min_edge=0.05)
     assert decision_long["action"] == "BUY"
     assert decision_long["outcome"] == "Down"
 
-
-# ── passes_opposite_reentry_gate ──────────────────────────────────────────────
-
 def test_opposite_gate_not_a_reentry_case():
-    # locked_outcome=None → never blocked here (normal entry path)
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome=None, proposed_outcome="Up",
         time_remaining_s=1800, min_minutes=10,
@@ -164,9 +110,7 @@ def test_opposite_gate_not_a_reentry_case():
     assert allowed
     assert reason == "NOT_REENTRY"
 
-
 def test_opposite_gate_allows_opposite_direction_with_time():
-    # Locked Up, GBM picks Down, 30m left — classic fakeout reversal scenario
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Down",
         time_remaining_s=1800, min_minutes=10,
@@ -174,9 +118,7 @@ def test_opposite_gate_allows_opposite_direction_with_time():
     assert allowed
     assert reason == "OPPOSITE_REENTRY_OK"
 
-
 def test_opposite_gate_blocks_same_direction_chase():
-    # Locked Up, GBM picks Up again → same-direction chase blocked
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Up",
         time_remaining_s=1800, min_minutes=10,
@@ -184,9 +126,7 @@ def test_opposite_gate_blocks_same_direction_chase():
     assert not allowed
     assert reason == "SAME_DIRECTION_CHASE_BLOCKED"
 
-
 def test_opposite_gate_blocks_when_too_close_to_resolve():
-    # Opposite direction but only 5m left — time floor blocks
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Down",
         time_remaining_s=5 * 60, min_minutes=10,
@@ -194,9 +134,7 @@ def test_opposite_gate_blocks_when_too_close_to_resolve():
     assert not allowed
     assert reason == "TIME_FLOOR_10M"
 
-
 def test_opposite_gate_time_floor_exact():
-    # Exactly at floor — should pass (>= comparison)
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Down",
         time_remaining_s=10 * 60, min_minutes=10,
@@ -204,9 +142,7 @@ def test_opposite_gate_time_floor_exact():
     assert allowed
     assert reason == "OPPOSITE_REENTRY_OK"
 
-
 def test_opposite_gate_works_with_down_locked():
-    # Locked Down, GBM picks Up → allowed
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Down", proposed_outcome="Up",
         time_remaining_s=1500, min_minutes=10,
@@ -214,12 +150,11 @@ def test_opposite_gate_works_with_down_locked():
     assert allowed
     assert reason == "OPPOSITE_REENTRY_OK"
 
-
 def test_opposite_gate_custom_min_minutes():
-    # Custom 15m floor — 12m should fail
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Down",
         time_remaining_s=12 * 60, min_minutes=15,
     )
     assert not allowed
     assert reason == "TIME_FLOOR_15M"
+

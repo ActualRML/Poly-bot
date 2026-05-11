@@ -23,7 +23,7 @@ SYMBOL_MAP = {
 
 _price_cache: dict[str, float] = {}
 _price_cache_time: dict[str, float] = {}
-_PRICE_TTL = 30
+_PRICE_TTL = 60
 
 _vol_cache: dict[str, float] = {}
 _vol_cache_time: dict[str, float] = {}
@@ -31,7 +31,10 @@ _VOL_TTL = 300
 
 _tech_cache: dict[str, dict] = {}
 _tech_cache_time: dict[str, float] = {}
-_TECH_TTL = 60  # 1 min — technical signals refresh each minute
+_TECH_TTL = 60
+
+_klines_cache: dict[str, tuple[list, float]] = {}
+_KLINES_TTL = 90
 
 _ban_until: float = 0.0
 _BAN_COOLDOWN = 300
@@ -43,7 +46,7 @@ _THROTTLE_PCT: float = 0.85       # reduce polling above this fraction
 _PAUSE_PCT: float = 0.95          # full pause above this fraction
 _rate_limit_status: str = "OK"    # "OK" | "THROTTLE" | "FULL_PAUSE"
 _rate_limit_set_at: float = 0.0   # monotonic timestamp when status was last elevated
-_RATE_WINDOW_S: float = 65.0      # Binance 1-min window + 5s buffer
+_RATE_WINDOW_S: float = 120.0
 
 def _check_rate_auto_reset() -> None:
     """Auto-reset FULL_PAUSE/THROTTLE after one Binance rate-limit window (65s)."""
@@ -175,6 +178,13 @@ async def fetch_klines(
         params["endTime"] = end_ms
 
     now = datetime.now(timezone.utc).timestamp()
+
+    if start_ms is None and end_ms is None:
+        _ck = f"{symbol.upper()}_{interval}_{limit}_klines"
+        _cached = _klines_cache.get(_ck)
+        if _cached and now - _cached[1] < _KLINES_TTL:
+            return _cached[0]
+
     _check_rate_auto_reset()
     if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
         logger.debug(f"[BINANCE] Klines {symbol} skip — ban/pause aktif")
@@ -199,6 +209,9 @@ async def fetch_klines(
             ts = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
             o, h, l, c = float(row[1]), float(row[2]), float(row[3]), float(row[4])
             result.append((ts, o, h, l, c))
+        if start_ms is None and end_ms is None:
+            _ck = f"{symbol.upper()}_{interval}_{limit}_klines"
+            _klines_cache[_ck] = (result, now)
         return result
     except Exception as e:
         logger.warning(f"[BINANCE] Klines fetch gagal {symbol}: {e}")
@@ -230,6 +243,13 @@ async def fetch_klines_extended(
         params["endTime"] = end_ms
 
     now = datetime.now(timezone.utc).timestamp()
+
+    if start_ms is None and end_ms is None:
+        _ck = f"{symbol.upper()}_{interval}_{limit}_ext"
+        _cached = _klines_cache.get(_ck)
+        if _cached and now - _cached[1] < _KLINES_TTL:
+            return _cached[0]
+
     if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
         logger.debug(f"[BINANCE] Klines ext {symbol} skip — ban/pause aktif")
         return []
@@ -255,6 +275,9 @@ async def fetch_klines_extended(
             vol = float(row[5])
             taker_buy_vol = float(row[9]) if len(row) > 9 else vol / 2
             result.append((ts, o, h, l, c, vol, taker_buy_vol))
+        if start_ms is None and end_ms is None:
+            _ck = f"{symbol.upper()}_{interval}_{limit}_ext"
+            _klines_cache[_ck] = (result, now)
         return result
     except Exception as e:
         logger.warning(f"[BINANCE] Klines extended fetch gagal {symbol}: {e}")

@@ -9,9 +9,6 @@ from src.logic.regime_filter import (
     session_bias,
 )
 
-
-# ── classify_correlation ──────────────────────────────────────────────────────
-
 def test_correlation_majority_up():
     moves = [("BTC", 0.005), ("ETH", 0.006), ("SOL", 0.008),
              ("XRP", 0.004), ("DOGE", 0.003), ("BNB", -0.001)]
@@ -43,7 +40,6 @@ def test_correlation_below_min_assets():
     assert r["reason"] == "insufficient_data"
 
 def test_correlation_threshold_filters_noise():
-    # All moves below threshold → not trending despite same direction
     moves = [("BTC", 0.001), ("ETH", 0.0015), ("SOL", 0.001),
              ("XRP", 0.001), ("DOGE", 0.001), ("BNB", 0.001)]
     r = classify_correlation(moves, move_threshold_pct=0.003, align_threshold=0.7)
@@ -55,17 +51,12 @@ def test_correlation_avg_move_pct_computed():
     assert abs(r["avg_move_pct"] - 0.02) < 1e-5
 
 def test_correlation_align_threshold_strict():
-    # 4/6 = 0.667 — below 0.7 threshold
     moves = [("BTC", 0.005), ("ETH", 0.005), ("SOL", 0.005), ("XRP", 0.005),
              ("DOGE", -0.005), ("BNB", -0.005)]
     r = classify_correlation(moves, move_threshold_pct=0.002, align_threshold=0.7)
     assert not r["trending"]
 
-
-# ── classify_htf_trend ────────────────────────────────────────────────────────
-
 def test_htf_aligned_up():
-    # Both 1h and 4h trending up
     closes_1h = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 110.0]
     closes_4h = [100.0, 102.0, 104.0, 110.0]
     r = classify_htf_trend(closes_1h, closes_4h, flat_threshold_pct=0.005)
@@ -99,9 +90,6 @@ def test_htf_insufficient_data():
     r = classify_htf_trend([100.0], [100.0])
     assert r["tf_1h"] is None
     assert r["label"] == "no_data"
-
-
-# ── session_bias ──────────────────────────────────────────────────────────────
 
 def test_session_us_open():
     t = datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc)  # 14:00 UTC
@@ -141,9 +129,6 @@ def test_session_late_night_asia():
     r = session_bias(t)
     assert r["session"] == "ASIA"
 
-
-# ── composite_regime ──────────────────────────────────────────────────────────
-
 def _cross(trending=False, direction=None):
     return {"trending": trending, "direction": direction,
             "aligned_count": 5, "total_count": 6, "avg_move_pct": 0.005,
@@ -169,7 +154,6 @@ def test_composite_strong_trending_up():
     assert r["direction"] == "up"
 
 def test_composite_cross_alone_borderline():
-    # Only cross trending → score=2 → MIXED (not enough to skip)
     r = composite_regime(_cross(trending=True, direction="up"),
                          _htf(aligned=False), _sess(trending=False))
     assert r["trend_score"] == 2
@@ -177,7 +161,6 @@ def test_composite_cross_alone_borderline():
     assert r["regime"] == "MIXED"
 
 def test_composite_cross_plus_htf_no_skip_at_threshold_4():
-    # Cross trending + HTF aligned → score=3 → MIXED (threshold raised to 4)
     r = composite_regime(_cross(trending=True, direction="up"),
                          _htf(aligned=True, tf="up"), _sess(trending=False))
     assert r["trend_score"] == 3
@@ -185,7 +168,6 @@ def test_composite_cross_plus_htf_no_skip_at_threshold_4():
     assert r["regime"] == "MIXED"
 
 def test_composite_cross_plus_htf_plus_session_skip():
-    # Cross + HTF + US_OPEN → score=4 → skip (full alignment)
     r = composite_regime(_cross(trending=True, direction="up"),
                          _htf(aligned=True, tf="up"), _sess(trending=True))
     assert r["trend_score"] == 4
@@ -193,7 +175,6 @@ def test_composite_cross_plus_htf_plus_session_skip():
     assert r["regime"] == "TRENDING_UP"
 
 def test_composite_htf_conflicts_cross():
-    # Cross up + HTF down → score = 2 - 1 = 1 → MIXED, no skip
     r = composite_regime(_cross(trending=True, direction="up"),
                          _htf(aligned=True, tf="down"), _sess(trending=False))
     assert r["trend_score"] == 1
@@ -206,7 +187,6 @@ def test_composite_ranging():
     assert not r["skip_contrarian"]
 
 def test_composite_us_open_alone_not_enough():
-    # Only US_OPEN session bias (+1) → MIXED but no skip
     r = composite_regime(_cross(trending=False), _htf(aligned=False), _sess(trending=True))
     assert r["trend_score"] == 1
     assert not r["skip_contrarian"]
@@ -224,3 +204,4 @@ def test_composite_today_scenario():
     assert r["trend_score"] == 3  # 2 (cross) + 1 (htf) + 0 (session)
     assert not r["skip_contrarian"]
     assert r["regime"] == "MIXED"
+

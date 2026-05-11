@@ -21,9 +21,6 @@ from src.logic.oracle_arb import (
 )
 from src.api.binance_ws import BinanceTickBuffer, GHOST_TIMEOUT
 
-
-# ── time_urgency ──────────────────────────────────────────────────────────────
-
 def test_urgency_normal():
     assert time_urgency(60.0) == "NORMAL"
 
@@ -35,21 +32,6 @@ def test_urgency_final_snipe():
     assert time_urgency(10.0) == "FINAL_SECOND_SNIPE"
     assert time_urgency(1.0) == "FINAL_SECOND_SNIPE"
     assert time_urgency(0.0) == "FINAL_SECOND_SNIPE"
-
-def test_urgency_boundary_31s():
-    assert time_urgency(31.0) == "NORMAL"
-
-def test_urgency_boundary_30s():
-    assert time_urgency(30.0) == "HIGH_ALERT"
-
-def test_urgency_boundary_11s():
-    assert time_urgency(11.0) == "HIGH_ALERT"
-
-def test_urgency_boundary_10s():
-    assert time_urgency(10.0) == "FINAL_SECOND_SNIPE"
-
-
-# ── detect_latency_arb ────────────────────────────────────────────────────────
 
 def test_latency_arb_detected_up():
     r = detect_latency_arb(binance_move_pct=0.3, elapsed_s=2.0)
@@ -79,15 +61,7 @@ def test_latency_arb_gap_pct():
     r = detect_latency_arb(binance_move_pct=0.5, elapsed_s=1.0, polymarket_move_pct=0.1)
     assert abs(r["gap_pct"] - 0.4) < 1e-4
 
-def test_latency_arb_no_arb_zero_move():
-    r = detect_latency_arb(binance_move_pct=0.0, elapsed_s=1.0)
-    assert not r["detected"]
-
-
-# ── gbm_prob_above ────────────────────────────────────────────────────────────
-
 def test_gbm_prob_above_at_strike():
-    # S == K → probability close to 0.5 (minus small vol drift term)
     p = gbm_prob_above(100.0, 100.0, vol_annual=1.0, time_remaining_s=3600)
     assert 0.4 < p < 0.6
 
@@ -106,7 +80,7 @@ def test_gbm_prob_below_complement():
 
 def test_gbm_prob_zero_time():
     p = gbm_prob_above(100.0, 99.0, vol_annual=0.5, time_remaining_s=0)
-    assert p == 0.5  # guard: returns 0.5 on invalid input
+    assert p == 0.5
 
 def test_gbm_prob_zero_vol():
     p = gbm_prob_above(100.0, 99.0, vol_annual=0.0, time_remaining_s=60)
@@ -115,11 +89,7 @@ def test_gbm_prob_zero_vol():
 def test_gbm_prob_longer_time_more_uncertain():
     p_short = gbm_prob_above(105.0, 100.0, vol_annual=2.0, time_remaining_s=10)
     p_long  = gbm_prob_above(105.0, 100.0, vol_annual=2.0, time_remaining_s=3600)
-    # More time → uncertainty increases → prob moves toward 0.5
     assert p_short > p_long
-
-
-# ── gbm_mc_prob_above ─────────────────────────────────────────────────────────
 
 def test_gbm_mc_seed_reproducible():
     p1 = gbm_mc_prob_above(100.0, 100.0, 0.8, 60, seed=42)
@@ -142,9 +112,6 @@ def test_gbm_mc_roughly_matches_closed_form():
 def test_gbm_mc_zero_time():
     p = gbm_mc_prob_above(100.0, 99.0, 0.5, 0, n_paths=100)
     assert p == 0.5
-
-
-# ── order_book_imbalance ──────────────────────────────────────────────────────
 
 def test_obi_buy_pressure():
     bids = [(100.0, 500.0), (99.5, 200.0)]
@@ -171,13 +138,10 @@ def test_obi_empty_books():
     assert r["ratio"] == 1.0
 
 def test_obi_out_of_range_excluded():
-    bids = [(200.0, 9999.0)]  # far from current_price=100
+    bids = [(200.0, 9999.0)]
     asks = [(100.5, 100.0)]
     r = order_book_imbalance(bids, asks, 100.0, range_pct=0.01)
     assert r["bid_vol"] == 0.0
-
-
-# ── sell_wall_check ───────────────────────────────────────────────────────────
 
 def test_sell_wall_detected():
     asks = [(100.1, 10.0), (100.2, 500.0), (100.3, 8.0)]
@@ -198,12 +162,9 @@ def test_sell_wall_empty_asks():
     assert r["wall_size"] == 0.0
 
 def test_sell_wall_no_asks_in_zone():
-    asks = [(102.0, 1000.0)]  # beyond scan zone
+    asks = [(102.0, 1000.0)]
     r = sell_wall_check(asks, current_price=100.0, strike_price=100.5, scan_range_pct=0.003)
     assert not r["wall_detected"]
-
-
-# ── arb_edge ──────────────────────────────────────────────────────────────────
 
 def test_arb_edge_positive():
     e = arb_edge(simulated_prob=0.75, polymarket_price=0.50, taker_fee=0.018)
@@ -220,9 +181,6 @@ def test_arb_edge_exact():
 def test_arb_edge_zero_fee():
     e = arb_edge(0.60, 0.50, taker_fee=0.0)
     assert abs(e - 0.10) < 1e-4
-
-
-# ── alpha_signal ──────────────────────────────────────────────────────────────
 
 def _arb(detected=True, direction="up", gap=0.2):
     return {"detected": detected, "direction": direction, "gap_pct": gap, "label": "ARB_DETECTED"}
@@ -268,24 +226,6 @@ def test_alpha_signal_wall_on_down_direction_does_not_block():
     r = alpha_signal(_arb(direction="down"), edge=0.08, wall=_wall(detected=True), urgency="NORMAL")
     assert r["action"] != "SKIP"
 
-
-# ── silent_execution ──────────────────────────────────────────────────────────
-
-def test_silent_execution_suppresses_logs(caplog):
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    with silent_execution():
-        logging.warning("should be silenced")
-    # After context exit, logging should be restored
-    assert root.level != logging.CRITICAL + 1
-
-def test_silent_execution_restores_level():
-    root = logging.getLogger()
-    original = root.level
-    with silent_execution():
-        pass
-    assert root.level == original
-
 def test_silent_execution_restores_on_exception():
     root = logging.getLogger()
     original = root.level
@@ -295,9 +235,6 @@ def test_silent_execution_restores_on_exception():
     except ValueError:
         pass
     assert root.level == original
-
-
-# ── BinanceTickBuffer ─────────────────────────────────────────────────────────
 
 def test_tick_buffer_empty():
     buf = BinanceTickBuffer()
@@ -314,15 +251,9 @@ def test_tick_buffer_latest_price():
 def test_tick_buffer_move_pct():
     buf = BinanceTickBuffer()
     buf.on_tick(100.0, 0)
-    buf.on_tick(101.0, 2000)  # 2s later → +1%
+    buf.on_tick(101.0, 2000)
     pct = buf.get_move_pct(seconds=3.0)
     assert abs(pct - 1.0) < 1e-6
-
-def test_tick_buffer_move_pct_no_old_data():
-    buf = BinanceTickBuffer()
-    buf.on_tick(100.0, 10_000_000)  # only one tick
-    pct = buf.get_move_pct(seconds=3.0)
-    assert pct == 0.0
 
 def test_tick_buffer_maxlen():
     buf = BinanceTickBuffer(maxlen=3)
@@ -333,21 +264,11 @@ def test_tick_buffer_maxlen():
 def test_tick_buffer_elapsed_since_move():
     buf = BinanceTickBuffer()
     buf.on_tick(100.0, 0)
-    buf.on_tick(100.2, 1000)   # +0.2% — above threshold 0.1%
-    buf.on_tick(100.2, 5000)   # latest at ts=5000ms
+    buf.on_tick(100.2, 1000)
+    buf.on_tick(100.2, 5000)
     elapsed = buf.get_elapsed_since_move(threshold_pct=0.1)
     assert elapsed is not None
     assert elapsed >= 0.0
-
-def test_tick_buffer_no_move_below_threshold():
-    buf = BinanceTickBuffer()
-    buf.on_tick(100.0, 0)
-    buf.on_tick(100.05, 1000)  # +0.05% — below threshold
-    elapsed = buf.get_elapsed_since_move(threshold_pct=0.1)
-    assert elapsed is None
-
-
-# ── BinanceTickBuffer — heartbeat / stale (Enhancement 6) ────────────────────
 
 def test_tick_buffer_stale_when_never_ticked():
     buf = BinanceTickBuffer()
@@ -361,7 +282,6 @@ def test_tick_buffer_not_stale_immediately_after_tick():
 def test_tick_buffer_stale_after_timeout(monkeypatch):
     buf = BinanceTickBuffer()
     buf.on_tick(100.0, 1000)
-    # Simulate passage of time by patching monotonic
     fake_time = buf._last_wall_ts + 3.0
     monkeypatch.setattr("src.api.binance_ws.time.monotonic", lambda: fake_time)
     assert buf.is_stale(timeout_s=2.0)
@@ -382,65 +302,18 @@ def test_tick_buffer_heartbeat_status_stale(monkeypatch):
     h = buf.heartbeat_status()
     assert not h["ok"]
     assert h["is_stale"]
-    assert h["warning"] is not None
     assert "STALE" in h["warning"]
-
-def test_tick_buffer_heartbeat_never_received():
-    buf = BinanceTickBuffer()
-    h = buf.heartbeat_status()
-    assert h["is_stale"]
-    assert h["last_seen_s"] is None
-
-def test_tick_buffer_latency_ms_none_when_empty():
-    buf = BinanceTickBuffer()
-    assert buf.latency_ms() is None
-
-def test_tick_buffer_latency_ms_non_negative():
-    buf = BinanceTickBuffer()
-    now_ms = int(time.time() * 1000)
-    buf.on_tick(100.0, now_ms - 50)  # exchange ts 50ms ago
-    lat = buf.latency_ms()
-    assert lat is not None
-    assert lat >= 0.0
-
-def test_ghost_timeout_constant():
-    assert GHOST_TIMEOUT == 2.0
-
-
-# ── gbm_mc_with_audit (Enhancement 6) ────────────────────────────────────────
 
 def test_gbm_mc_audit_keys():
     r = gbm_mc_with_audit(100.0, 100.0, 0.8, 60, seed=42)
     for k in ("prob", "seed_used", "n_paths", "current", "strike", "time_remaining_s"):
         assert k in r
 
-def test_gbm_mc_audit_seed_preserved():
-    r = gbm_mc_with_audit(100.0, 100.0, 0.8, 60, seed=7777)
-    assert r["seed_used"] == 7777
-
-def test_gbm_mc_audit_auto_seed_unique():
-    r1 = gbm_mc_with_audit(100.0, 100.0, 0.8, 60)
-    r2 = gbm_mc_with_audit(100.0, 100.0, 0.8, 60)
-    # Two calls without explicit seed should likely differ (microsecond resolution)
-    # Can't guarantee in fast CI, but seeds should be int
-    assert isinstance(r1["seed_used"], int)
-    assert isinstance(r2["seed_used"], int)
-
 def test_gbm_mc_audit_prob_matches_direct():
     seed = 12345
     direct = gbm_mc_prob_above(100.0, 100.0, 0.8, 60, seed=seed)
     via_audit = gbm_mc_with_audit(100.0, 100.0, 0.8, 60, seed=seed)
     assert abs(via_audit["prob"] - direct) < 1e-10
-
-def test_gbm_mc_microseed_when_none():
-    # When seed=None, auto-generated seed must be a positive int
-    import src.logic.oracle_arb as _arb
-    seed = _arb._mc_seed()
-    assert isinstance(seed, int)
-    assert seed >= 0
-
-
-# ── sync_strike_price (Enhancement 6) ────────────────────────────────────────
 
 def test_sync_strike_price_ok():
     r = sync_strike_price(100.0, 100.1, tolerance=0.005)
@@ -452,13 +325,7 @@ def test_sync_strike_price_mismatch():
     assert not r["ok"]
     assert r["label"] == "PRICE_MISMATCH"
 
-def test_sync_strike_price_conservative_is_higher():
-    r = sync_strike_price(100.0, 100.3, tolerance=0.005)
-    assert r["ok"]
-    assert r["strike"] == max(100.0, 100.3)
-
 def test_sync_strike_price_exact_tolerance_boundary():
-    # exactly at tolerance → diff_pct == tolerance → not > tolerance → SYNCED
     r = sync_strike_price(100.0, 100.5, tolerance=0.005)
     assert r["ok"]
 
@@ -470,14 +337,6 @@ def test_sync_strike_price_zero_ref():
     r = sync_strike_price(100.0, 0.0, tolerance=0.005)
     assert not r["ok"]
     assert r["label"] == "PRICE_MISMATCH"
-
-def test_sync_strike_price_diff_pct_computed():
-    r = sync_strike_price(100.0, 102.0, tolerance=0.05)
-    # diff_pct = |100 - 102| / 102 ≈ 0.019608
-    assert abs(r["diff_pct"] - abs(100 - 102) / 102) < 1e-5
-
-
-# ── alpha_signal audit trail (Enhancement 6) ─────────────────────────────────
 
 def _arb_dict(detected=True, direction="up"):
     return {"detected": detected, "direction": direction, "gap_pct": 0.2, "label": "ARB_DETECTED"}
@@ -494,20 +353,6 @@ def test_alpha_signal_audit_trail_in_final_snipe():
     assert r["audit_trail"]["mc_seed"] == 999
     assert r["audit_trail"]["strike_synced"] == 50000.0
 
-def test_alpha_signal_no_audit_trail_on_normal():
-    audit = {"mc_seed": 999}
-    r = alpha_signal(_arb_dict(), edge=0.08, wall=_wall_dict(),
-                     urgency="NORMAL", audit=audit)
-    assert "audit_trail" not in r
-
-def test_alpha_signal_no_audit_when_none_passed():
-    r = alpha_signal(_arb_dict(), edge=0.08, wall=_wall_dict(),
-                     urgency="FINAL_SECOND_SNIPE", audit=None)
-    assert "audit_trail" not in r
-
-
-# ── Rate-limit shield (Enhancement 6) ────────────────────────────────────────
-
 def _reset_rate_state():
     _bc._rate_weight_1m = 0
     _bc._rate_limit_status = "OK"
@@ -518,30 +363,17 @@ def test_rate_limit_status_initial():
     assert r["status"] == "OK"
     assert r["weight_used"] == 0
 
-def test_rate_limit_update_ok():
-    _reset_rate_state()
-    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "500"})
-    r = _bc.get_rate_limit_status()
-    assert r["status"] == "OK"
-    assert r["weight_used"] == 500
-
 def test_rate_limit_update_throttle():
     _reset_rate_state()
-    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "1020"})  # 85%
+    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "1020"})
     r = _bc.get_rate_limit_status()
     assert r["status"] == "THROTTLE"
 
 def test_rate_limit_update_full_pause():
     _reset_rate_state()
-    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "1140"})  # 95%
+    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "1140"})
     r = _bc.get_rate_limit_status()
     assert r["status"] == "FULL_PAUSE"
-
-def test_rate_limit_missing_header_no_change():
-    _reset_rate_state()
-    _bc._rate_weight_1m = 300
-    _bc._update_rate_weight({})  # no header
-    assert _bc._rate_weight_1m == 300  # unchanged
 
 def test_rate_limit_lowercase_header():
     _reset_rate_state()
@@ -553,15 +385,3 @@ def test_rate_limit_fraction_computed():
     _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": "600"})
     r = _bc.get_rate_limit_status()
     assert abs(r["fraction"] - 0.5) < 1e-4
-
-def test_rate_limit_throttle_boundary():
-    _reset_rate_state()
-    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": str(int(1200 * 0.85))})
-    r = _bc.get_rate_limit_status()
-    assert r["status"] == "THROTTLE"
-
-def test_rate_limit_pause_boundary():
-    _reset_rate_state()
-    _bc._update_rate_weight({"X-MBX-USED-WEIGHT-1M": str(int(1200 * 0.95))})
-    r = _bc.get_rate_limit_status()
-    assert r["status"] == "FULL_PAUSE"

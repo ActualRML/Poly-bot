@@ -5,14 +5,12 @@ from datetime import datetime, timezone, timedelta
 
 import src.models.database as db_mod
 
-
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test_bot.db"
     monkeypatch.setattr(db_mod, "DB_PATH", db_path)
     db_mod.init_db()
     yield db_path
-
 
 def _sample_pos(condition_id="0xabc", outcome="Yes"):
     return {
@@ -31,11 +29,6 @@ def _sample_pos(condition_id="0xabc", outcome="Yes"):
         "kelly_fraction": "0.05",
         "strategy_mode": "mispricing",
     }
-
-
-# ==============================================================================
-# init_db / schema
-# ==============================================================================
 
 def test_init_db_creates_tables(tmp_path, monkeypatch):
     fresh_db = tmp_path / "fresh.db"
@@ -72,11 +65,6 @@ def test_migrate_adds_token_id_column(tmp_path, monkeypatch):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
     assert "token_id" in cols
 
-
-# ==============================================================================
-# save_position / get_open_positions
-# ==============================================================================
-
 def test_save_position_returns_row_id():
     row_id = db_mod.save_position(_sample_pos())
     assert isinstance(row_id, int) and row_id > 0
@@ -112,11 +100,6 @@ def test_two_different_markets_both_open():
     db_mod.save_position(_sample_pos("0x2", "Yes"))
     assert len(db_mod.get_open_positions()) == 2
 
-
-# ==============================================================================
-# close_position
-# ==============================================================================
-
 def test_close_position_removes_from_open():
     db_mod.save_position(_sample_pos())
     db_mod.close_position("0xabc", "Yes", Decimal("0.90"), "trailing_stop", Decimal("3.85"))
@@ -134,18 +117,12 @@ def test_close_position_stores_pnl():
 def test_close_position_only_affects_open_status():
     db_mod.save_position(_sample_pos())
     db_mod.close_position("0xabc", "Yes", Decimal("0.90"), "stop", Decimal("3.0"))
-    # Second call has no effect — already closed
     db_mod.close_position("0xabc", "Yes", Decimal("0.50"), "stop2", Decimal("-5.0"))
     with sqlite3.connect(db_mod.DB_PATH) as conn:
         row = conn.execute(
             "SELECT pnl_usdc FROM positions WHERE condition_id='0xabc'"
         ).fetchone()
     assert float(row[0]) == pytest.approx(3.0)
-
-
-# ==============================================================================
-# get_stats
-# ==============================================================================
 
 def _close_with_trade(condition_id, outcome, exit_price, reason, pnl):
     db_mod.close_position(condition_id, outcome, exit_price, reason, pnl)
@@ -158,7 +135,6 @@ def _close_with_trade(condition_id, outcome, exit_price, reason, pnl):
         "shares":       "10",
         "usdc_amount":  float(pnl),
     })
-
 
 def test_stats_empty_db():
     stats = db_mod.get_stats()
@@ -192,11 +168,6 @@ def test_stats_survives_reopen():
     assert stats["wins"] == 1
     assert stats["total_pnl"] == pytest.approx(1.0)
 
-
-# ==============================================================================
-# count_open_positions / get_position_by_market
-# ==============================================================================
-
 def test_count_open_positions():
     assert db_mod.count_open_positions() == 0
     db_mod.save_position(_sample_pos("0x1", "Yes"))
@@ -211,11 +182,6 @@ def test_get_position_by_market_found():
 
 def test_get_position_by_market_not_found():
     assert db_mod.get_position_by_market("0xnotexist") is None
-
-
-# ==============================================================================
-# log_prediction / resolve_prediction
-# ==============================================================================
 
 def test_log_prediction_and_resolve_won():
     db_mod.log_prediction({
@@ -266,3 +232,4 @@ def test_log_prediction_duplicate_ignored():
             "SELECT COUNT(*) FROM predictions WHERE condition_id='0xdup'"
         ).fetchone()[0]
     assert count == 1
+

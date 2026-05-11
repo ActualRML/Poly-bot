@@ -5,10 +5,8 @@ from src.logic.mispricing import MispricingDetector, BaseRate, MispricingDirecti
 
 detector = MispricingDetector(threshold=0.15)
 
-
 def make_rate(rate: float, confidence: float = 0.8) -> BaseRate:
     return BaseRate(source="test", rate=rate, confidence=confidence)
-
 
 @given(
     rates=st.lists(
@@ -84,3 +82,4 @@ def test_fair_when_within_threshold():
     result = detector.analyze("0x1", "Q?", "Yes", 0.50, [make_rate(0.55)], threshold=0.15)
     assert not result.is_mispriced
     assert result.direction == MispricingDirection.FAIR
+

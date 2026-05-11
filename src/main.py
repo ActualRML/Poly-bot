@@ -29,6 +29,18 @@ from src.utils.logger import log, tampilkan_header
 from src.utils.telegram_alert import init_telegram, get_alert
 from src.logic.risk_manager import get_dynamic_stop_loss, calculate_position_size
 from src.logic.strategy import get_dynamic_threshold, should_force_exit
+from src.logic.candle_strategy import scan_candle_markets, analyze_candle_market
+from src.logic.slot_manager import (
+    slot_history_count, record_slot_entry, cleanup_old_slots,
+    HOURLY_MAX_ENTRIES_PER_SLOT,
+)
+from src.logic.symbol_blacklist import check_symbol_blacklist, maybe_blacklist_symbol
+from src.logic.price_stagnation import track_market_price, is_price_stagnant
+from src.logic.hourly_scanner import scan_updown_hourly_markets
+from src.logic.reentry_manager import (
+    reentry_candidates, register_reentry_candidate, cleanup_reentry_candidates,
+)
+from src.utils.parsing import detect_symbol_from_question, extract_price_target
 
 logger = logging.getLogger(__name__)
 
@@ -39,152 +51,6 @@ _price_lock        = asyncio.Lock()
 _open_position_lock = asyncio.Lock()
 _cg_ban_until: float = 0.0
 _CG_BAN_COOLDOWN    = 120
-
-# ── Hourly slot history (cumulative entries per resolve slot) ────────────────
-_hourly_slot_history: dict[str, int] = {}
-_HOURLY_MAX_ENTRIES_PER_SLOT = 5  # default; overridden by config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT
-
-def _slot_key(end_date: datetime) -> str:
-    return end_date.replace(second=0, microsecond=0).isoformat()
-
-def _record_slot_entry(end_date: datetime) -> None:
-    k = _slot_key(end_date)
-    _hourly_slot_history[k] = _hourly_slot_history.get(k, 0) + 1
-
-def _slot_history_count(end_date: datetime) -> int:
-    return _hourly_slot_history.get(_slot_key(end_date), 0)
-
-def _cleanup_old_slots() -> None:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(second=0, microsecond=0).isoformat()
-    for k in list(_hourly_slot_history.keys()):
-        if k < cutoff:
-            del _hourly_slot_history[k]
-
-# ── Per-symbol blacklist (auto-cooldown after consecutive losses) ────────────
-_symbol_blacklist_until: dict[str, datetime] = {}
-_SYMBOL_BLACKLIST_HOURS = 4
-_SYMBOL_LOSS_STREAK_THRESHOLD = 3
-
-def _check_symbol_blacklist(symbol: str) -> bool:
-    until = _symbol_blacklist_until.get(symbol.upper())
-    if until and datetime.now(timezone.utc) < until:
-        return True
-    return False
-
-def _maybe_blacklist_symbol(symbol: str) -> None:
-    """Query last N closed hourly trades, filter by symbol from question, blacklist
-    if the most recent _SYMBOL_LOSS_STREAK_THRESHOLD are all losses."""
-    try:
-        from src.models.database import get_recent_closed_hourly
-        sym_upper = symbol.upper()
-        rows = get_recent_closed_hourly(limit=20)
-        # Filter for this symbol via question parsing
-        sym_rows = [
-            r for r in rows
-            if _detect_symbol_from_question(r.get("question", "")) == sym_upper
-        ]
-        if len(sym_rows) < _SYMBOL_LOSS_STREAK_THRESHOLD:
-            return
-        recent = sym_rows[:_SYMBOL_LOSS_STREAK_THRESHOLD]
-        if all(r["pnl"] < 0 for r in recent):
-            _symbol_blacklist_until[sym_upper] = (
-                datetime.now(timezone.utc) + timedelta(hours=_SYMBOL_BLACKLIST_HOURS)
-            )
-            log.warning(
-                f"[BLACKLIST] {symbol} di-blacklist {_SYMBOL_BLACKLIST_HOURS}h "
-                f"setelah {_SYMBOL_LOSS_STREAK_THRESHOLD} loss berturut-turut"
-            )
-    except Exception as _e:
-        logger.debug(f"[BLACKLIST] Check error for {symbol}: {_e}")
-
-# ── Re-entry candidates after profit lock ────────────────────────────────────
-_reentry_candidates: dict[str, dict] = {}
-# {condition_id → {
-#   "outcome", "exit_price", "exit_time_iso", "original_capital_usdc",
-#   "token_id", "resolve_date_iso", "question", "symbol", "slot_key"
-# }}
-
-_SYMBOL_KEYWORDS = {
-    "BTC":  ("bitcoin", "btc"),
-    "ETH":  ("ethereum", "eth"),
-    "SOL":  ("solana", "sol"),
-    "XRP":  ("xrp",),
-    "DOGE": ("dogecoin", "doge"),
-    "BNB":  ("bnb",),
-}
-
-def _detect_symbol_from_question(question: str) -> str:
-    if not question:
-        return "UNKNOWN"
-    q_lower = question.lower()
-    # Check longer keywords first to avoid false matches (e.g. "ethereum" before "eth")
-    for sym, keywords in _SYMBOL_KEYWORDS.items():
-        for kw in keywords:
-            if kw in q_lower:
-                return sym
-    return "UNKNOWN"
-
-def _register_reentry_candidate(decision, pos_row: dict | None = None) -> None:
-    """Hook called when EXIT_LOCK_PROFIT fires for hourly. Stores context for re-entry watch."""
-    pos = decision.position
-    if pos.strategy_mode not in ("updown_hourly", "updown_hourly_dry_run"):
-        return
-    cid = pos.condition_id
-    symbol = _detect_symbol_from_question(pos.question)
-    _reentry_candidates[cid] = {
-        "outcome":               pos.outcome,
-        "exit_price":            float(pos.current_price),
-        "exit_time_iso":         datetime.now(timezone.utc).isoformat(),
-        "original_capital_usdc": float(pos.capital_at_risk),
-        "token_id":              pos.token_id,
-        "resolve_date_iso":      pos.resolve_date.isoformat(),
-        "question":              pos.question,
-        "symbol":                symbol or "UNKNOWN",
-        "slot_key":              pos.resolve_date.replace(second=0, microsecond=0).isoformat(),
-    }
-    log.info(
-        f"[REENTRY WATCH] {symbol} {pos.outcome} @ {float(pos.current_price):.3f} — "
-        f"monitoring drop ≥30% with mispricing"
-    )
-
-def _cleanup_reentry_candidates() -> None:
-    """Remove candidates whose resolve slot has passed or is too close."""
-    now = datetime.now(timezone.utc)
-    to_remove = []
-    for cid, ctx in _reentry_candidates.items():
-        try:
-            resolve = datetime.fromisoformat(ctx["resolve_date_iso"])
-            if resolve <= now or (resolve - now).total_seconds() < 60:
-                to_remove.append(cid)
-        except Exception:
-            to_remove.append(cid)
-    for cid in to_remove:
-        _reentry_candidates.pop(cid, None)
-
-# ── Outcome price stagnation detector ────────────────────────────────────────
-_market_price_history: dict[str, list[tuple[float, float]]] = {}  # cid → [(price, ts_monotonic)]
-
-def _track_market_price(cid: str, price: float) -> None:
-    import time as _t
-    now = _t.monotonic()
-    hist = _market_price_history.setdefault(cid, [])
-    hist.append((price, now))
-    cutoff = now - 600  # 10 min
-    _market_price_history[cid] = [(p, t) for p, t in hist if t > cutoff]
-
-def _is_price_stagnant(cid: str, lookback_s: float = 300, threshold_pct: float = 0.005) -> bool:
-    import time as _t
-    hist = _market_price_history.get(cid, [])
-    if len(hist) < 3:
-        return False
-    cutoff = _t.monotonic() - lookback_s
-    recent = [p for p, t in hist if t > cutoff]
-    if len(recent) < 3:
-        return False
-    p_min, p_max = min(recent), max(recent)
-    if p_min <= 0:
-        return False
-    return (p_max - p_min) / p_min < threshold_pct
 
 async def _fetch_crypto_price(symbol: str, session: aiohttp.ClientSession) -> float | None:
     from src.api.binance_client import fetch_price as _binance_price
@@ -267,84 +133,6 @@ async def _build_vol_data(session: aiohttp.ClientSession, hours: int | None = No
             vol_data[symbol] = result
     return vol_data
 
-async def _force_exit_check(
-    clob,
-    manager,
-    breaker,
-    current_prices: dict,
-    session: aiohttp.ClientSession,
-) -> set[str]:
-    from src.models.database import get_open_positions
-    from src.logic.pricing import ke_decimal
-
-    closed: set[str] = set()
-
-    for pos in get_open_positions():
-        try:
-            expiry = datetime.fromisoformat(pos["resolve_date"])
-            if expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
-        except Exception:
-            continue
-
-        if not should_force_exit(expiry):
-            continue
-
-        if pos.get("strategy_mode", "") in ("updown_hourly", "updown_hourly_dry_run"):
-            continue
-
-        cid     = pos["condition_id"]
-        outcome = pos["outcome"]
-        tid     = pos.get("token_id") or ""
-
-        price_decimal = (current_prices.get(cid) or {}).get(outcome)
-        if price_decimal is None:
-            logger.warning(
-                f"[FORCE EXIT] Tidak bisa exit {pos['question'][:40]} — "
-                f"harga tidak tersedia di cache"
-            )
-            continue
-
-        price  = float(price_decimal)
-        entry  = ke_decimal(pos["entry_price"])
-        shares = ke_decimal(pos["shares"])
-        pnl    = (ke_decimal(str(price)) - entry) * shares
-
-        log.warning(
-            f"[FORCE EXIT] {pos['question'][:40]} | {outcome} @ {price:.3f} | "
-            f"PnL ${float(pnl):+.2f} — mendekati expiry"
-        )
-
-        if not config.DRY_RUN and tid:
-            clob.pasang_order(
-                sisi     = SisiOrder.JUAL,
-                harga    = ke_decimal(str(price)),
-                ukuran   = shares,
-                token_id = tid,
-            )
-        elif config.DRY_RUN:
-            log.warning(
-                f"[yellow][DRY RUN] Simulasi force exit {outcome} @ {price:.3f}[/yellow]"
-            )
-
-        manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, "force_exit_expiry")
-        breaker.record_trade(float(pnl))
-        closed.add(cid)
-
-        alert = get_alert()
-        if alert:
-            await alert.alert_exit(
-                question    = pos["question"],
-                outcome     = outcome,
-                entry_price = float(entry),
-                exit_price  = price,
-                pnl_usdc    = float(pnl),
-                reason      = "force_exit_expiry",
-                session     = session,
-            )
-
-    return closed
-
 async def _get_base_rates(
     market: dict, builder, session: aiohttp.ClientSession,
     vol_data: dict | None = None,
@@ -373,7 +161,7 @@ async def _get_base_rates(
         price = await _fetch_crypto_price(symbol, session)
         if not price:
             return []
-        target = _extract_price_target(question)
+        target = extract_price_target(question)
         if not target:
             return []
         direction = "below" if any(k in question for k in ["dip", "drop", "fall", "below", "↓"]) else "above"
@@ -836,14 +624,13 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
 
         manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, reason)
         breaker.record_trade(float(pnl))
-        # Per-symbol blacklist check on hourly losses at resolve
         if (
             pos.get("strategy_mode") in ("updown_hourly", "updown_hourly_dry_run")
             and float(pnl) < 0
         ):
-            _sym = _detect_symbol_from_question(pos.get("question", ""))
+            _sym = detect_symbol_from_question(pos.get("question", ""))
             if _sym != "UNKNOWN":
-                _maybe_blacklist_symbol(_sym)
+                maybe_blacklist_symbol(_sym)
         closed.add(cid)
 
         log.info(
@@ -893,28 +680,6 @@ _UPDOWN_SERIES = {
     "ETH": "40",
     "SOL": "10086",
     "XRP": "10100",
-}
-
-_UPDOWN_HOURLY_SLUG_PREFIXES = {
-    "BTC":  "bitcoin-up-or-down-",
-    "ETH":  "ethereum-up-or-down-",
-    "SOL":  "solana-up-or-down-",
-    "XRP":  "xrp-up-or-down-",
-    "DOGE": "dogecoin-up-or-down-",
-    "BNB":  "bnb-up-or-down-",
-}
-_UPDOWN_HOURLY_SKIP_MARKERS = ("-5m-", "-15m-", "-4h-", "updown-5m", "updown-15m", "updown-4h")
-
-# Candle strategy: bitcoin-up-or-down-may-10-2026-12pm-et style
-# Resolves based on whether the named 1h Binance candle is green/red.
-# Strike = candle OPEN = Binance 1h open at (endDate - 1h), NOT event startDate.
-_CANDLE_UPDOWN_SLUG_PREFIXES = {
-    "BTC":  "bitcoin-up-or-down-",
-    "ETH":  "ethereum-up-or-down-",
-    "SOL":  "solana-up-or-down-",
-    "XRP":  "xrp-up-or-down-",
-    "DOGE": "dogecoin-up-or-down-",
-    "BNB":  "bnb-up-or-down-",
 }
 
 async def _scan_updown_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
@@ -1027,7 +792,6 @@ async def _analyze_updown_market(
         logger.debug(f"[UPDOWN] {symbol} {delta_sec/3600:.1f}h left > {max_hours}h max — terlalu awal, skip")
         return
 
-    # T-floor: short windows (< N hours) too vulnerable to vol regime spikes
     min_hours = getattr(config, "UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE", 2.0)
     if delta_sec < min_hours * 3600:
         logger.debug(
@@ -1036,8 +800,6 @@ async def _analyze_updown_market(
         )
         return
 
-    # Apply vol floor before probability calc — prevents over-confident model
-    # when realized 4h vol is artificially low (calm before storm).
     _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
     if _vol_floor > 0 and vol_data:
         vol_data = {
@@ -1068,8 +830,6 @@ async def _analyze_updown_market(
     if buy_price <= 0 or buy_price >= 1:
         return
 
-    # Cross-asset regime filter — skip bet against strong consensus trend.
-    # If 70%+ of crypto basket is trending UP and HTF aligned, don't bet Down (vice versa).
     if market_regime and market_regime.get("skip_contrarian"):
         regime_dir = market_regime.get("direction")  # "up" / "down" / None
         if regime_dir == "up" and buy_outcome == "Down":
@@ -1212,180 +972,6 @@ async def _analyze_updown_market(
                 strategy = "Up/Down Daily",
             )
 
-async def _scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: GammaClient) -> list[dict]:
-    import json as _json
-
-    results = []
-    now     = datetime.now(timezone.utc)
-
-    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
-    max_min = getattr(config, "UPDOWN_HOURLY_MAX_MINUTES", 90)
-    end_min = (now + timedelta(minutes=min_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_max = (now + timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    try:
-        batch = await gamma._aget(
-            "/events",
-            session,
-            params={
-                "closed":       "false",
-                "limit":        200,
-                "order":        "endDate",
-                "ascending":    "true",
-                "end_date_min": end_min,
-                "end_date_max": end_max,
-            },
-        )
-    except Exception as e:
-        logger.debug(f"[UPDOWN HOURLY] Gagal fetch events: {e}")
-        return results
-
-    if not isinstance(batch, list):
-        return results
-
-    for event in batch:
-        slug = (event.get("slug") or "").lower()
-
-        symbol = None
-        for sym, prefix in _UPDOWN_HOURLY_SLUG_PREFIXES.items():
-            if slug.startswith(prefix):
-                symbol = sym
-                break
-        if not symbol:
-            continue
-
-        if any(m in slug for m in _UPDOWN_HOURLY_SKIP_MARKERS):
-            continue
-
-        end_date_str   = event.get("endDate") or ""
-        start_date_str = event.get("startDate") or ""
-        try:
-            end_date   = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-            start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
-        except Exception:
-            continue
-
-        minutes_left = (end_date - now).total_seconds() / 60
-        if minutes_left < min_min or minutes_left > max_min:
-            continue
-
-        mkts = event.get("markets", [])
-        if not mkts:
-            continue
-        mkt = mkts[0]
-
-        outcomes = mkt.get("outcomes", [])
-        if isinstance(outcomes, str):
-            try: outcomes = _json.loads(outcomes)
-            except: outcomes = []
-        op = mkt.get("outcomePrices", [])
-        if isinstance(op, str):
-            try: op = _json.loads(op)
-            except: op = []
-
-        outcomes_lower = [str(o).lower() for o in outcomes]
-        if "up" not in outcomes_lower or not op:
-            continue
-
-        mkt["_symbol"]     = symbol
-        mkt["_start_date"] = start_date.isoformat()
-        mkt["endDate"]     = end_date_str
-        results.append(mkt)
-
-    return results
-
-async def _scan_updown_candle_markets(
-    session: aiohttp.ClientSession,
-    gamma: GammaClient,
-) -> list[dict]:
-    """
-    Fetch bitcoin-up-or-down-* style markets (1h candle green/red).
-    Strike = Binance 1h candle OPEN at endDate - 1h.
-    Only returns markets where the candle has already started.
-    Uses limit=500 so these markets are not crowded out by 5m/15m events.
-    """
-    import json as _json
-    from datetime import timedelta
-
-    results = []
-    now     = datetime.now(timezone.utc)
-    min_min = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5)
-    max_min = getattr(config, "UPDOWN_HOURLY_MAX_MINUTES", 90)
-    end_min = (now + timedelta(minutes=min_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_max = (now + timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    try:
-        batch = await gamma._aget(
-            "/events",
-            session,
-            params={
-                "closed":       "false",
-                "limit":        500,
-                "order":        "endDate",
-                "ascending":    "true",
-                "end_date_min": end_min,
-                "end_date_max": end_max,
-            },
-        )
-    except Exception as e:
-        logger.debug(f"[CANDLE UPDOWN] Gagal fetch events: {e}")
-        return results
-
-    if not isinstance(batch, list):
-        return results
-
-    for event in batch:
-        slug = (event.get("slug") or "").lower()
-
-        symbol = None
-        for sym, prefix in _CANDLE_UPDOWN_SLUG_PREFIXES.items():
-            if slug.startswith(prefix):
-                symbol = sym
-                break
-        if not symbol:
-            continue
-
-        end_date_str = event.get("endDate") or ""
-        try:
-            end_date     = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-            candle_start = end_date - timedelta(hours=1)
-        except Exception:
-            continue
-
-        # Only trade active candles (candle has started)
-        if candle_start > now:
-            continue
-
-        minutes_left = (end_date - now).total_seconds() / 60
-        if minutes_left < min_min or minutes_left > max_min:
-            continue
-
-        mkts = event.get("markets", [])
-        if not mkts:
-            continue
-        mkt = mkts[0]
-
-        outcomes = mkt.get("outcomes", [])
-        if isinstance(outcomes, str):
-            try: outcomes = _json.loads(outcomes)
-            except: outcomes = []
-        op = mkt.get("outcomePrices", [])
-        if isinstance(op, str):
-            try: op = _json.loads(op)
-            except: op = []
-
-        outcomes_lower = [str(o).lower() for o in outcomes]
-        if "up" not in outcomes_lower or not op:
-            continue
-
-        # _start_date = candle open time (NOT event.startDate which is creation date)
-        mkt["_symbol"]     = symbol
-        mkt["_start_date"] = candle_start.isoformat()
-        mkt["endDate"]     = end_date_str
-        results.append(mkt)
-
-    return results
-
 
 async def _scan_reentry_opportunities(
     clob, sizer, manager, breaker, capital: float,
@@ -1393,10 +979,6 @@ async def _scan_reentry_opportunities(
     btc_scalp: dict | None = None,
     symbol_momentum_map: dict | None = None,
 ) -> None:
-    """
-    Monitor profit-locked markets for re-entry opportunity.
-    Triggers when shares price drops ≥30% from TP exit AND fair value > current.
-    """
     from decimal import Decimal as _D
     from src.logic.reentry import (
         estimate_fair_value, check_reentry_signal,
@@ -1404,13 +986,13 @@ async def _scan_reentry_opportunities(
     )
     from src.logic.pricing import ke_decimal as _ked
 
-    if not _reentry_candidates:
+    if not reentry_candidates:
         return
 
-    log.info(f"[REENTRY SCAN] {len(_reentry_candidates)} kandidat dipantau")
+    log.info(f"[REENTRY SCAN] {len(reentry_candidates)} kandidat dipantau")
 
-    for cid in list(_reentry_candidates.keys()):
-        ctx = _reentry_candidates[cid]
+    for cid in list(reentry_candidates.keys()):
+        ctx = reentry_candidates[cid]
         symbol     = ctx["symbol"]
         outcome    = ctx["outcome"]
         exit_price = ctx["exit_price"]
@@ -1418,28 +1000,26 @@ async def _scan_reentry_opportunities(
         try:
             resolve_dt = datetime.fromisoformat(ctx["resolve_date_iso"])
         except Exception:
-            _reentry_candidates.pop(cid, None)
+            reentry_candidates.pop(cid, None)
             continue
 
         mins_to_resolve = (resolve_dt - datetime.now(timezone.utc)).total_seconds() / 60.0
         if mins_to_resolve <= 0:
-            _reentry_candidates.pop(cid, None)
+            reentry_candidates.pop(cid, None)
             continue
         if not passes_time_gate(mins_to_resolve, min_minutes=15.0):
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — {mins_to_resolve:.0f}m left < 15m gate, skip")
             continue
 
-        # Slot cap check
         slot_open = count_open_by_resolve_slot(resolve_dt)
-        slot_hist = _slot_history_count(resolve_dt)
+        slot_hist = slot_history_count(resolve_dt)
         if config.MAX_POSITIONS_PER_SLOT > 0 and slot_open >= config.MAX_POSITIONS_PER_SLOT:
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — slot OPEN cap reached")
             continue
-        if slot_hist >= _HOURLY_MAX_ENTRIES_PER_SLOT:
+        if slot_hist >= HOURLY_MAX_ENTRIES_PER_SLOT:
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — slot CUMULATIVE cap reached")
             continue
 
-        # Fetch current Polymarket price
         try:
             snap = clob.ambil_snapshot(token_id=token_id)
             if not snap or not snap.valid:
@@ -1449,14 +1029,12 @@ async def _scan_reentry_opportunities(
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — snapshot error: {e}")
             continue
 
-        # Fair value from Binance state
         sym_mtf = (symbol_momentum_map or {}).get(symbol)
         fair_value = estimate_fair_value(outcome, btc_scalp, sym_mtf)
         if fair_value is None:
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — no fair value (missing data)")
             continue
 
-        # Check signal
         sig = check_reentry_signal(
             exit_price=exit_price,
             current_market_price=current_market_price,
@@ -1469,7 +1047,6 @@ async def _scan_reentry_opportunities(
             )
             continue
 
-        # Orderbook validation — fetch full bids+asks
         full_ob = clob.get_full_orderbook(token_id)
         bids = full_ob.get("bids", [])
         asks = full_ob.get("asks", [])
@@ -1484,7 +1061,6 @@ async def _scan_reentry_opportunities(
             logger.debug(f"[REENTRY] {symbol} {cid[:8]} — orderbook fail: {ob['reason']}")
             continue
 
-        # All checks passed — place re-entry order at half size
         kelly_capital = capital_required
         kelly_shares  = (_D(str(kelly_capital)) / _D(str(current_market_price))).quantize(_D("0.0001"))
 
@@ -1550,9 +1126,8 @@ async def _scan_reentry_opportunities(
                     logger.warning(f"[REENTRY] {symbol} {cid[:8]} order gagal — keep candidate, retry next cycle")
 
             if entry_succeeded:
-                _record_slot_entry(resolve_dt)
-                # Remove from candidates (one successful re-entry per market per session)
-                _reentry_candidates.pop(cid, None)
+                record_slot_entry(resolve_dt)
+                reentry_candidates.pop(cid, None)
 
 
 async def _analyze_updown_hourly_market(
@@ -1579,10 +1154,6 @@ async def _analyze_updown_hourly_market(
         logger.debug(f"[UPDOWN HOURLY] Skip {condition_id[:8]} — closed this cycle, no re-entry")
         return
 
-    # Profit-locked market handling:
-    # - Default: block ALL re-entry (legacy)
-    # - With OPPOSITE_REENTRY enabled: allow re-entry, but later enforce
-    #   decision.outcome != locked_outcome (opposite-only) + min time floor.
     locked_outcome: str | None = None
     if profit_locked_markets and condition_id in profit_locked_markets:
         if not getattr(config, "UPDOWN_HOURLY_OPPOSITE_REENTRY", False):
@@ -1592,7 +1163,6 @@ async def _analyze_updown_hourly_market(
             return
         locked_outcome = profit_locked_markets.get(condition_id) if isinstance(profit_locked_markets, dict) else None
         if not locked_outcome:
-            # No outcome stored → fall back to legacy block (safe default)
             logger.debug(
                 f"[UPDOWN HOURLY] Skip {condition_id[:8]} — profit locked (no outcome recorded)"
             )
@@ -1642,7 +1212,6 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # Min T floor: GBM probabilities are unreliable at very short T (sigma*sqrt(T) too small)
     _min_t_min = getattr(config, "UPDOWN_HOURLY_MIN_T_MINUTES", 20)
     if delta_sec < _min_t_min * 60:
         logger.debug(
@@ -1650,12 +1219,10 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # Track Polymarket price for stagnation detection
-    _track_market_price(condition_id, market_price_up)
+    track_market_price(condition_id, market_price_up)
 
-    # Slot cap (cumulative): max N entries per resolve slot per session
     slot_open_count = count_open_by_resolve_slot(end_date)
-    slot_history    = _slot_history_count(end_date)
+    slot_history    = slot_history_count(end_date)
     max_per_slot    = config.MAX_POSITIONS_PER_SLOT
     if max_per_slot > 0 and slot_open_count >= max_per_slot:
         logger.debug(
@@ -1663,7 +1230,7 @@ async def _analyze_updown_hourly_market(
             f"{slot_open_count}/{max_per_slot} OPEN di slot {end_date.strftime('%H:%M')} UTC"
         )
         return
-    _max_entries = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", _HOURLY_MAX_ENTRIES_PER_SLOT)
+    _max_entries = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", HOURLY_MAX_ENTRIES_PER_SLOT)
     if slot_history >= _max_entries:
         logger.debug(
             f"[UPDOWN HOURLY] Skip {symbol} — "
@@ -1672,13 +1239,10 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # Per-symbol blacklist
-    if _check_symbol_blacklist(symbol):
-        until = _symbol_blacklist_until.get(symbol.upper())
-        logger.debug(f"[UPDOWN HOURLY] {symbol} blacklisted until {until.isoformat()} — skip")
+    if check_symbol_blacklist(symbol):
+        logger.debug(f"[UPDOWN HOURLY] {symbol} blacklisted — skip")
         return
 
-    # Per-symbol momentum (used for vol_ratio sanity & logging context)
     sym_mtf = (symbol_momentum_map or {}).get(symbol.upper())
     if sym_mtf is None:
         logger.debug(f"[UPDOWN HOURLY] {symbol} — no momentum data, skip")
@@ -1691,7 +1255,6 @@ async def _analyze_updown_hourly_market(
 
     use_gbm = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
 
-    # Legacy contrarian gating (only when GBM disabled — GBM uses fair-value vs market)
     if not use_gbm:
         regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
         regime_max = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MAX", 0.008)
@@ -1714,8 +1277,7 @@ async def _analyze_updown_hourly_market(
             )
             return
 
-    # Volume conviction sanity (applies to both GBM and contrarian modes)
-    min_vol_ratio = getattr(config, "UPDOWN_HOURLY_MIN_VOL_RATIO", 0.7)
+    min_vol_ratio = config.UPDOWN_HOURLY_MIN_VOL_RATIO
     if sym_vol_ratio < min_vol_ratio:
         logger.debug(
             f"[UPDOWN HOURLY] {symbol} — volume ratio {sym_vol_ratio:.2f} "
@@ -1723,23 +1285,28 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # Outcome price stagnation
-    if _is_price_stagnant(condition_id):
+    if is_price_stagnant(condition_id):
         logger.debug(
             f"[UPDOWN HOURLY] {symbol} — Polymarket price stagnan "
             f"(<0.5% range dalam 5m), skip"
         )
         return
 
-    # ── Direction decision: GBM probabilistic vs legacy contrarian ──
     _gbm_decision: dict | None = None
     if use_gbm:
         from src.logic.gbm_hourly import evaluate_hourly_entry
         vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
-        # Vol floor — prevents over-confident model during calm-before-storm windows
         _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
         if _vol_floor > 0:
             vol_annual = max(vol_annual, _vol_floor)
+        _vol_edge_factor = config.UPDOWN_GBM_VOL_EDGE_FACTOR
+        _adj_min_edge = max(config.UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual * _vol_edge_factor)
+        if _adj_min_edge > config.UPDOWN_HOURLY_GBM_MIN_EDGE:
+            logger.debug(
+                f"[UPDOWN HOURLY] {symbol} vol-adj min_edge: "
+                f"{config.UPDOWN_HOURLY_GBM_MIN_EDGE:.0%} → {_adj_min_edge:.1%} "
+                f"(vol={vol_annual:.0%})"
+            )
         try:
             _gbm_decision = await evaluate_hourly_entry(
                 symbol          = symbol,
@@ -1749,7 +1316,7 @@ async def _analyze_updown_hourly_market(
                 vol_annual      = vol_annual,
                 session         = session,
                 fee             = config.UPDOWN_HOURLY_FEE,
-                min_edge        = config.UPDOWN_HOURLY_GBM_MIN_EDGE,
+                min_edge        = _adj_min_edge,
                 max_edge        = getattr(config, "UPDOWN_HOURLY_GBM_MAX_EDGE", 0.25),
                 use_trend_bias  = getattr(config, "UPDOWN_HOURLY_USE_TREND_BIAS", True),
             )
@@ -1785,9 +1352,6 @@ async def _analyze_updown_hourly_market(
             buy_outcome = "Up"
             buy_price   = market_price_up
 
-    # Market consensus floor: never bet against 90%+ market conviction.
-    # When market prices one outcome at <10%, thousands of traders already agree
-    # it's nearly impossible. GBM edge vs this is almost always spurious (T too short).
     _consensus_thr = getattr(config, "UPDOWN_HOURLY_CONSENSUS_FLOOR", 0.90)
     if buy_outcome == "Down" and market_price_up > _consensus_thr:
         logger.debug(
@@ -1802,7 +1366,6 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # ── Technical signal gate (RSI, Z-score, Binance volume spike) ────────────
     if use_gbm and getattr(config, "UPDOWN_HOURLY_USE_TECHNICAL", True):
         from src.api.binance_client import fetch_technical_signals as _fetch_tech
         _tech_rsi_p = getattr(config, "UPDOWN_HOURLY_RSI_PERIOD", 14)
@@ -1824,12 +1387,10 @@ async def _analyze_updown_hourly_market(
             _rsi_os = getattr(config, "UPDOWN_HOURLY_RSI_OVERSOLD", 30.0)
             _z_thr  = getattr(config, "UPDOWN_HOURLY_ZSCORE_THR", 2.5)
 
-            # Hard block: Binance volume spike = market in turbulent mode
             if _spike:
                 logger.debug(f"[UPDOWN HOURLY] {symbol} — Binance vol spike, GBM unreliable, skip")
                 return
 
-            # RSI exhaustion: don't chase an already-exhausted move
             if _rsi is not None:
                 if buy_outcome == "Up" and _rsi >= _rsi_ob:
                     logger.debug(
@@ -1842,7 +1403,6 @@ async def _analyze_updown_hourly_market(
                     )
                     return
 
-            # Z-score extreme: price at tail of 24h distribution → mean-reversion risk
             if _z is not None and _z_thr > 0:
                 if buy_outcome == "Up" and _z >= _z_thr:
                     logger.debug(
@@ -1855,9 +1415,6 @@ async def _analyze_updown_hourly_market(
                     )
                     return
 
-            # Momentum alignment: RSI shows prevailing trend → don't bet against it.
-            # Different from the exhaustion filter above (which is mean-reversion).
-            # Here: RSI > 65 means uptrend ongoing → Down bet is counter-trend → skip.
             _rsi_mom_ob = getattr(config, "UPDOWN_HOURLY_RSI_MOM_OB", 65.0)
             _rsi_mom_os = getattr(config, "UPDOWN_HOURLY_RSI_MOM_OS", 35.0)
             if _rsi is not None:
@@ -1872,8 +1429,6 @@ async def _analyze_updown_hourly_market(
                     )
                     return
 
-            # Z-score momentum: price trending away from mean → don't fight the direction.
-            # Threshold lower than mean-reversion (1.5 vs 2.5) — catches mid-range trend.
             _z_mom_thr = getattr(config, "UPDOWN_HOURLY_ZSCORE_MOM_THR", 1.5)
             if _z is not None and _z_mom_thr > 0:
                 if buy_outcome == "Down" and _z >= _z_mom_thr:
@@ -1887,8 +1442,6 @@ async def _analyze_updown_hourly_market(
                     )
                     return
 
-            # Macro trend gate: use BTC 4h trend as the primary macro signal.
-            # On strongly trending days, counter-trend bets almost always lose.
             if getattr(config, "UPDOWN_HOURLY_MACRO_TREND_GATE", True):
                 _macro_thr = getattr(config, "UPDOWN_HOURLY_MACRO_TREND_THR", 0.02)
                 if _macro_thr > 0:
@@ -1923,7 +1476,6 @@ async def _analyze_updown_hourly_market(
                 f"[UPDOWN HOURLY] {symbol} tech OK — RSI={_rsi} Z={_z} spike={_spike}"
             )
 
-    # ── BTC-lead correlation (altcoins follow BTC direction) ──────────────────
     _btc_corr_thr = getattr(config, "UPDOWN_HOURLY_BTC_CORR_THR", 0.005)
     if use_gbm and symbol != "BTC" and _btc_corr_thr > 0 and symbol_momentum_map:
         _btc_mtf = symbol_momentum_map.get("BTC")
@@ -1938,7 +1490,6 @@ async def _analyze_updown_hourly_market(
                     )
                     return
 
-    # ── Opposite-only enforcement for profit-locked markets ──
     if locked_outcome is not None:
         from src.logic.gbm_hourly import passes_opposite_reentry_gate
         opp_min_min = getattr(config, "UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES", 10)
@@ -1960,7 +1511,6 @@ async def _analyze_updown_hourly_market(
             f"locked={locked_outcome}, picking {buy_outcome} ({delta_sec/60:.1f}m left)"
         )
 
-    buy_winrate      = 0.55
     _scalp_kelly_mult = 1.0
 
     if buy_price <= 0 or buy_price >= 1:
@@ -1981,24 +1531,35 @@ async def _analyze_updown_hourly_market(
         )
         return
 
-    # ── Scalping signal gate (BTC signal dihitung 1× di scan loop, di-pass ke sini) ──
-    _scalp_action = "TRADE"
-    if btc_scalp is not None:
-        _scalp_action     = btc_scalp.get("action", "TRADE")
-        _scalp_kelly_mult = btc_scalp.get("kelly_multiplier", 1.0)
-        if _scalp_action in ("WAIT_NOISE", "WAIT_TREND"):
-            logger.debug(
-                f"[UPDOWN HOURLY] {symbol} scalp gate: {_scalp_action} "
-                f"(score={btc_scalp.get('momentum_score', 0):.2f}) — skip"
-            )
-            return
-        if _scalp_kelly_mult == 0.0:
-            logger.debug(f"[UPDOWN HOURLY] {symbol} ATR ekstrem — scalp kelly=0, skip")
-            return
-        # Wider clamp: 0.50–0.75 (was 0.52–0.68)
-        buy_winrate = max(0.50, min(0.75, btc_scalp.get("confidence", 0.55)))
+    # GBM prob_up = P(candle closes above strike). Map ke sisi yang dibeli.
+    if _gbm_decision is not None:
+        _raw_prob = (
+            _gbm_decision["prob_up"]
+            if buy_outcome == "Up"
+            else 1.0 - _gbm_decision["prob_up"]
+        )
+        buy_winrate = max(0.50, min(0.80, _raw_prob))
+    else:
+        buy_winrate = 0.55
 
-    # Asia session sizing reduction (low-liquidity hours)
+    if btc_scalp is not None:
+        # BTC scalp tetap drive kelly_multiplier (ATR-based), bukan winrate
+        _scalp_kelly_mult = max(0.5, btc_scalp.get("kelly_multiplier", 1.0))
+
+    # Momentum alignment: same direction as GBM → bet more, opposite → bet less
+    _mom_aligned = (
+        (buy_outcome == "Up" and sym_momentum > 0.0005) or
+        (buy_outcome == "Down" and sym_momentum < -0.0005)
+    )
+    _mom_opposed = (
+        (buy_outcome == "Up" and sym_momentum < -0.0005) or
+        (buy_outcome == "Down" and sym_momentum > 0.0005)
+    )
+    if _mom_aligned:
+        _scalp_kelly_mult = min(_scalp_kelly_mult * 1.2, 1.5)
+    elif _mom_opposed:
+        _scalp_kelly_mult = _scalp_kelly_mult * 0.75
+
     if market_session == "ASIA":
         _scalp_kelly_mult = min(_scalp_kelly_mult, 0.7)
 
@@ -2018,7 +1579,6 @@ async def _analyze_updown_hourly_market(
         capped_shares = (capped_usdc / Decimal(str(buy_price))).quantize(Decimal("0.0001"))
         kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
 
-    # Apply ATR-volatility kelly multiplier from scalping signals
     if _scalp_kelly_mult < 1.0:
         from dataclasses import replace as _dc_replace
         scaled_usdc   = Decimal(str(round(float(kelly.bet_usdc) * _scalp_kelly_mult, 2)))
@@ -2034,7 +1594,6 @@ async def _analyze_updown_hourly_market(
     token    = next((t for t in tokens if str(t.get("outcome", "")).lower() == _bo_lower), None)
     token_id = str(token["token_id"]) if token and token.get("token_id") else ""
 
-    # Pre-entry liquidity check (real CLOB book)
     if token_id and not config.DRY_RUN:
         try:
             from src.logic.scalping_exit import liquidity_check
@@ -2067,8 +1626,8 @@ async def _analyze_updown_hourly_market(
         f"BUY {buy_outcome} @ {buy_price:.3f} {_mode_label} | "
         f"sym 5m/15m/30m {sym_m5:+.2%}/{sym_momentum:+.2%}/{sym_m30:+.2%} "
         f"vol×{sym_vol_ratio:.2f} | "
-        f"scalp={_scalp_action} wr={buy_winrate:.2f} km={_scalp_kelly_mult} | "
-        f"slot {slot_history+1}/{_HOURLY_MAX_ENTRIES_PER_SLOT} | Kelly ${float(kelly.bet_usdc):.2f}"
+        f"scalp={btc_scalp.get('action', '-') if btc_scalp else '-'} wr={buy_winrate:.2f} km={_scalp_kelly_mult} | "
+        f"slot {slot_history+1}/{HOURLY_MAX_ENTRIES_PER_SLOT} | Kelly ${float(kelly.bet_usdc):.2f}"
     )
 
     async with _open_position_lock:
@@ -2090,13 +1649,11 @@ async def _analyze_updown_hourly_market(
         except Exception:
             resolve_date = datetime.now(timezone.utc)
 
-        # gap_pct: under GBM, store the realized edge; under contrarian, fall back to BTC momentum.
         _record_gap = (
             float(_gbm_decision["edge"])
             if _gbm_decision is not None
             else abs(btc_regime or 0.0)
         )
-        # predicted_prob: store actual GBM prob_up (not scalp confidence used for Kelly sizing)
         _record_prob = (
             str(round(_gbm_decision["prob_up"], 4))
             if _gbm_decision is not None
@@ -2127,7 +1684,7 @@ async def _analyze_updown_hourly_market(
                 "gap_pct":        str(round(_record_gap * 100, 2)),
                 "resolve_date":   resolve_date.isoformat(),
             })
-            _record_slot_entry(end_date)
+            record_slot_entry(end_date)
         else:
             if not token_id:
                 logger.warning(f"[UPDOWN HOURLY] token_id tidak ditemukan untuk {buy_outcome}")
@@ -2163,9 +1720,8 @@ async def _analyze_updown_hourly_market(
                     "gap_pct":        str(round(_record_gap * 100, 2)),
                     "resolve_date":   resolve_date.isoformat(),
                 })
-                _record_slot_entry(end_date)
+                record_slot_entry(end_date)
             else:
-                # Order gagal — jangan record slot (tidak ada posisi terbuka)
                 logger.warning(f"[UPDOWN HOURLY] {symbol} order gagal — slot tidak di-record")
                 return
 
@@ -2183,320 +1739,6 @@ async def _analyze_updown_hourly_market(
                 strategy = "Up/Down Hourly",
             )
 
-async def _analyze_updown_candle_market(
-    market: dict,
-    clob,
-    gamma,
-    sizer,
-    manager,
-    breaker,
-    capital: float,
-    session: aiohttp.ClientSession,
-    closed_this_cycle: set | None = None,
-    candle_sl_markets: dict | None = None,
-) -> None:
-    """
-    Momentum-based candle strategy. Entry in first 5–15m of candle using 15m
-    BTC momentum (15 × 1m closes). Asymmetric exit: SL at 50% of entry price,
-    profit lock at T1/T2. After SL fires, reverse re-entry if momentum flips.
-    """
-    import json as _json
-    from decimal import Decimal
-    from src.logic.pricing import ke_decimal
-    from src.api.binance_client import fetch_klines
-    from src.models.database import log_prediction
-    from src.logic.reentry import check_candle_reverse_reentry
-
-    symbol = market.get("_symbol", "")
-    if not symbol:
-        return
-
-    condition_id = market.get("conditionId", market.get("id", ""))
-    if closed_this_cycle and condition_id in closed_this_cycle:
-        return
-
-    if _check_symbol_blacklist(symbol):
-        logger.debug(f"[CANDLE UPDOWN] {symbol} blacklisted, skip")
-        return
-
-    # Slot cumulative cap (shared with hourly strategy)
-    end_date_str = market.get("endDate", "")
-    try:
-        end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-    except Exception:
-        return
-
-    max_entries = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", _HOURLY_MAX_ENTRIES_PER_SLOT)
-    if _slot_history_count(end_date) >= max_entries:
-        logger.debug(f"[CANDLE UPDOWN] {symbol} slot penuh ({max_entries}), skip")
-        return
-
-    # Parse outcomes
-    outcomes = market.get("outcomes", [])
-    op       = market.get("outcomePrices", [])
-    if isinstance(outcomes, str):
-        try: outcomes = _json.loads(outcomes)
-        except: outcomes = []
-    if isinstance(op, str):
-        try: op = _json.loads(op)
-        except: op = []
-
-    outcomes_lower = [str(o).lower() for o in outcomes]
-    if "up" not in outcomes_lower or not op:
-        return
-    try:
-        up_idx          = outcomes_lower.index("up")
-        market_price_up = float(op[up_idx])
-    except (ValueError, IndexError):
-        return
-    if not (0.0 < market_price_up < 1.0):
-        return
-
-    start_date_str = market.get("_start_date", "")
-    try:
-        start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
-    except Exception:
-        return
-
-    now           = datetime.now(timezone.utc)
-    t_remaining_s = (end_date - now).total_seconds()
-    if t_remaining_s <= 0:
-        return
-
-    t_min = t_remaining_s / 60.0
-    if t_min < getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5):
-        return
-
-    candle_running_min = (now - start_date).total_seconds() / 60.0
-
-    # Is this a reverse re-entry after SL?
-    sl_outcome         = (candle_sl_markets or {}).get(condition_id)
-    is_reverse_reentry = sl_outcome is not None
-
-    if not is_reverse_reentry:
-        # Initial entry: only in first 5–15m window
-        candle_open_min = getattr(config, "UPDOWN_HOURLY_CANDLE_OPEN_MIN", 5)
-        if candle_running_min < candle_open_min:
-            logger.debug(
-                f"[CANDLE UPDOWN] {symbol} candle baru {candle_running_min:.0f}m jalan, "
-                f"tunggu {candle_open_min}m"
-            )
-            return
-        if candle_running_min > 15:
-            logger.debug(
-                f"[CANDLE UPDOWN] {symbol} candle sudah {candle_running_min:.0f}m, "
-                f"lewat window entry"
-            )
-            return
-
-    # Fetch 15 × 1m klines for momentum signal
-    klines_1m = await fetch_klines(symbol, session, interval="1m", limit=16)
-    if len(klines_1m) < 15:
-        logger.debug(f"[CANDLE UPDOWN] {symbol} 1m klines tidak cukup ({len(klines_1m)})")
-        return
-
-    closes_1m = [float(k[4]) for k in klines_1m[-15:]]
-    if closes_1m[0] <= 0:
-        return
-    momentum_15m = (closes_1m[-1] - closes_1m[0]) / closes_1m[0]
-
-    mom_threshold = getattr(config, "CANDLE_UPDOWN_MOM_THRESHOLD", 0.0015)
-    max_buy_price = getattr(config, "CANDLE_UPDOWN_MAX_BUY_PRICE", 0.60)
-
-    if is_reverse_reentry:
-        market_price_down = round(1.0 - market_price_up, 4)
-        opp_price = market_price_down if sl_outcome == "Up" else market_price_up
-        rev = check_candle_reverse_reentry(
-            sl_outcome            = sl_outcome,
-            momentum_15m          = momentum_15m,
-            minutes_to_resolve    = t_min,
-            market_price_opposite = opp_price,
-            momentum_threshold    = mom_threshold,
-            min_minutes           = getattr(config, "CANDLE_UPDOWN_REVERSE_MIN_MINUTES", 20.0),
-            max_buy_price         = max_buy_price,
-        )
-        if not rev["should_reenter"]:
-            logger.debug(
-                f"[CANDLE UPDOWN REVERSE] {symbol} skip — {rev['reason']} "
-                f"mom={momentum_15m:+.5f}"
-            )
-            return
-        buy_outcome  = rev["outcome"]
-        buy_price    = opp_price
-        is_half_size = True
-        entry_reason = f"REVERSE_{rev['reason']}"
-    else:
-        if momentum_15m > mom_threshold:
-            buy_outcome  = "Up"
-            buy_price    = market_price_up
-        elif momentum_15m < -mom_threshold:
-            buy_outcome  = "Down"
-            buy_price    = round(1.0 - market_price_up, 4)
-        else:
-            logger.debug(
-                f"[CANDLE UPDOWN] {symbol} momentum flat {momentum_15m:+.5f} "
-                f"(threshold ±{mom_threshold:.4f}), skip"
-            )
-            return
-        is_half_size = False
-        entry_reason = f"MOM_{momentum_15m:+.5f}"
-
-    if buy_price > max_buy_price:
-        logger.debug(
-            f"[CANDLE UPDOWN] {symbol} {buy_outcome} price {buy_price:.3f} > "
-            f"max {max_buy_price:.2f}, skip"
-        )
-        return
-
-    if config.CB_ENABLED and not breaker.check(unrealized_pnl=manager.get_unrealized_pnl()).can_trade:
-        return
-
-    # Kelly sizing: momentum magnitude as confidence proxy
-    buy_winrate = min(max(0.50 + abs(momentum_15m) * 20.0, 0.50), 0.65)
-    kelly = sizer.calculate(
-        winrate      = buy_winrate,
-        market_price = buy_price,
-        capital      = capital,
-    )
-    if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
-        return
-
-    max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
-    effective_max = max_size * 0.5 if is_half_size else max_size
-    if float(kelly.bet_usdc) > effective_max:
-        from dataclasses import replace as _dc_replace
-        capped_usdc   = Decimal(str(effective_max))
-        capped_shares = (capped_usdc / Decimal(str(buy_price))).quantize(Decimal("0.0001"))
-        kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
-
-    question = market.get("question", market.get("title", f"{symbol} Up or Down"))
-
-    log.info(
-        f"[bold green][CANDLE UPDOWN][/bold green] {symbol} {t_min:.0f}m left | "
-        f"{'REVERSE ' if is_reverse_reentry else ''}BUY {buy_outcome} @ {buy_price:.3f} | "
-        f"mom={momentum_15m:+.5f} ({entry_reason}) winrate={buy_winrate:.2f} | "
-        f"Kelly ${float(kelly.bet_usdc):.2f}"
-    )
-
-    tokens    = gamma.extract_token_ids(market)
-    _bo_lower = buy_outcome.lower()
-    token     = next((t for t in tokens if str(t.get("outcome", "")).lower() == _bo_lower), None)
-    token_id  = str(token["token_id"]) if token and token.get("token_id") else ""
-
-    async with _open_position_lock:
-        can_open, reason = manager.can_open(
-            condition_id  = condition_id,
-            outcome       = buy_outcome,
-            bet_usdc      = kelly.bet_usdc,
-            total_capital = ke_decimal(capital),
-        )
-        if not can_open:
-            logger.debug(f"[CANDLE UPDOWN] Skip {condition_id[:8]} {buy_outcome}: {reason}")
-            return
-
-        try:
-            resolve_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-        except Exception:
-            resolve_date = datetime.now(timezone.utc)
-
-        _record_gap  = float(round(momentum_15m, 5))
-        _record_prob = str(round(buy_winrate, 4))
-
-        if config.DRY_RUN:
-            log.warning("[yellow][CANDLE UPDOWN] DRY RUN — simulasi posisi dibuka[/yellow]")
-            manager.open_position(
-                condition_id    = condition_id,
-                question        = question,
-                outcome         = buy_outcome,
-                entry_price     = ke_decimal(buy_price),
-                shares          = kelly.shares,
-                capital_at_risk = kelly.bet_usdc,
-                resolve_date    = resolve_date,
-                gap_pct         = _record_gap,
-                kelly_fraction  = float(kelly.bet_fraction),
-                strategy_mode   = "updown_candle_dry_run",
-                token_id        = "",
-            )
-            log_prediction({
-                "condition_id":   condition_id,
-                "question":       question,
-                "outcome":        buy_outcome,
-                "predicted_prob": _record_prob,
-                "market_price":   str(buy_price),
-                "gap_pct":        str(round(_record_gap * 100, 4)),
-                "resolve_date":   resolve_date.isoformat(),
-            })
-            _record_slot_entry(end_date)
-            if is_reverse_reentry and candle_sl_markets is not None:
-                candle_sl_markets.pop(condition_id, None)
-            alert = get_alert()
-            if alert:
-                await alert.alert_signal(
-                    question = question,
-                    outcome  = buy_outcome,
-                    price    = buy_price,
-                    bet_usdc = float(kelly.bet_usdc),
-                    gap_pct  = _record_gap * 100,
-                    ev       = float(kelly.expected_value),
-                    session  = session,
-                    dry_run  = config.DRY_RUN,
-                    strategy = "Candle Up/Down",
-                )
-        else:
-            if not token_id:
-                logger.warning(f"[CANDLE UPDOWN] token_id tidak ditemukan untuk {buy_outcome}")
-                return
-
-            order = clob.pasang_order(
-                sisi     = SisiOrder.BELI,
-                harga    = ke_decimal(buy_price),
-                ukuran   = kelly.shares,
-                token_id = token_id,
-            )
-            if order:
-                manager.open_position(
-                    condition_id    = condition_id,
-                    question        = question,
-                    outcome         = buy_outcome,
-                    entry_price     = ke_decimal(buy_price),
-                    shares          = kelly.shares,
-                    capital_at_risk = kelly.bet_usdc,
-                    resolve_date    = resolve_date,
-                    gap_pct         = _record_gap,
-                    kelly_fraction  = float(kelly.bet_fraction),
-                    strategy_mode   = "updown_candle",
-                    token_id        = token_id,
-                )
-                log_prediction({
-                    "condition_id":   condition_id,
-                    "question":       question,
-                    "outcome":        buy_outcome,
-                    "predicted_prob": _record_prob,
-                    "market_price":   str(buy_price),
-                    "gap_pct":        str(round(_record_gap * 100, 4)),
-                    "resolve_date":   resolve_date.isoformat(),
-                })
-                _record_slot_entry(end_date)
-                if is_reverse_reentry and candle_sl_markets is not None:
-                    candle_sl_markets.pop(condition_id, None)
-
-                alert = get_alert()
-                if alert:
-                    await alert.alert_signal(
-                        question = question,
-                        outcome  = buy_outcome,
-                        price    = buy_price,
-                        bet_usdc = float(kelly.bet_usdc),
-                        gap_pct  = _record_gap * 100,
-                        ev       = float(kelly.expected_value),
-                        session  = session,
-                        dry_run  = config.DRY_RUN,
-                        strategy = "Candle Up/Down",
-                    )
-            else:
-                logger.warning(f"[CANDLE UPDOWN] {symbol} order gagal")
-
-
 _TARIK_FLAG = Path(__file__).resolve().parent.parent / "data" / "tarik.flag"
 
 
@@ -2506,11 +1748,6 @@ async def _execute_tarik(
     session: aiohttp.ClientSession,
     condition_ids: list[str] | None = None,
 ) -> str:
-    """
-    Close specific positions by condition_id (from /tarik N command).
-    condition_ids=None → tutup semua posisi open.
-    Returns summary string for Telegram reply.
-    """
     from src.models.database import get_open_positions
     from src.logic.pricing import ke_decimal
 
@@ -2539,7 +1776,6 @@ async def _execute_tarik(
         pnl      = (current - entry) * shares
         question = pos.get("question", "")[:40]
 
-        # Live: place sell order first
         if not config.DRY_RUN and pos.get("token_id"):
             try:
                 clob.pasang_order(
@@ -2602,6 +1838,8 @@ async def run_mispricing_mode(clob: ClobClient):
             hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 60.0),
             hourly_trailing_activate_pct = getattr(config, "HOURLY_TRAILING_ACTIVATE_PCT", 15.0),
             hourly_trailing_retrace_pct  = getattr(config, "HOURLY_TRAILING_RETRACE_PCT", 0.30),
+            hourly_lock_t1_pct           = getattr(config, "HOURLY_LOCK_T1_PCT", 150.0),
+            hourly_lock_t2_pct           = getattr(config, "HOURLY_LOCK_T2_PCT", 100.0),
         ),
     )
     builder = BaseRateBuilder()
@@ -2629,10 +1867,7 @@ async def run_mispricing_mode(clob: ClobClient):
         await reconcile_positions(clob, gamma, manager, breaker, session)
 
         _cb_alerted = False
-        # condition_id → outcome that was locked (e.g. "Up" or "Down").
-        # Used by hourly strategy to allow opposite-direction GBM re-entry.
         _profit_locked_markets: dict[str, str] = {}
-        # condition_id → outcome that was SL'd — triggers reverse re-entry check.
         _candle_sl_markets: dict[str, str] = {}
         while True:
             try:
@@ -2674,7 +1909,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     manager.exit_evaluator.trailing_stop_pct = Decimal(str(new_stop))
                     logger.debug(f"[STOP] trailing_stop={new_stop:.1%} avg_P={avg_P:.2f}")
 
-                # update harga open positions di DB (untuk monitor) tanpa trigger exit
                 from src.models.database import get_open_positions as _gop, update_position_price as _upp
                 for _pos in _gop():
                     _cid, _out = _pos["condition_id"], _pos["outcome"]
@@ -2682,7 +1916,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     if _p:
                         _upp(_cid, _out, _p)
 
-                # ── Manual /tarik command from Telegram monitor bot ──────────
                 if _TARIK_FLAG.exists():
                     try:
                         _tarik_raw = _TARIK_FLAG.read_text().strip()
@@ -2700,7 +1933,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     except Exception as _te:
                         logger.warning(f"[TARIK] Error: {_te}")
 
-                # Evaluate exits — fires profit lock & late-stage SL untuk hourly
                 try:
                     from src.logic.exit_strategy import ExitSignal as _XS
                     exit_decisions = manager.evaluate_exits(current_prices)
@@ -2708,23 +1940,30 @@ async def run_mispricing_mode(clob: ClobClient):
                         if not _d.should_exit:
                             continue
 
-                        # CRITICAL: update circuit breaker (manager._process_exit doesn't)
+                        _exit_pnl = float(_d.estimated_pnl_usdc or 0)
+                        log.info(
+                            f"[EXIT] {'✅ WIN' if _exit_pnl >= 0 else '❌ LOSE'} "
+                            f"{_d.signal.value.upper()} — "
+                            f"{_d.position.question[:40]} | {_d.position.outcome} "
+                            f"@ {float(_d.position.entry_price):.3f}"
+                            f"→{float(_d.position.current_price):.3f} | "
+                            f"PnL ${_exit_pnl:+.2f} | {_d.reason}"
+                        )
+
                         try:
                             _pnl = float(_d.estimated_pnl_usdc or 0)
                             breaker.record_trade(_pnl)
                         except Exception as _e:
                             logger.warning(f"[BREAKER] record_trade error: {_e}")
 
-                        # Per-symbol blacklist check — fire after hourly loss recorded
                         if (
                             _d.position.strategy_mode in ("updown_hourly", "updown_hourly_dry_run")
                             and float(_d.estimated_pnl_usdc or 0) < 0
                         ):
-                            _sym = _detect_symbol_from_question(_d.position.question)
+                            _sym = detect_symbol_from_question(_d.position.question)
                             if _sym != "UNKNOWN":
-                                _maybe_blacklist_symbol(_sym)
+                                maybe_blacklist_symbol(_sym)
 
-                        # Register reverse re-entry candidate after candle SL
                         if (_d.signal == _XS.EXIT_CATASTROPHIC
                                 and _d.position.strategy_mode in (
                                     "updown_candle", "updown_candle_dry_run"
@@ -2736,14 +1975,12 @@ async def run_mispricing_mode(clob: ClobClient):
                                 f"{_d.position.outcome} SL'd — queued for reverse re-entry"
                             )
 
-                        # Register re-entry candidate for hourly profit lock
                         if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
                             "updown_hourly", "updown_hourly_dry_run"
                         ):
-                            _register_reentry_candidate(_d)
+                            register_reentry_candidate(_d)
                             _profit_locked_markets[_d.position.condition_id] = _d.position.outcome
 
-                        # Place CLOB sell order for live mode
                         if not config.DRY_RUN and _d.position.token_id:
                             try:
                                 from src.logic.pricing import ke_decimal as _ked
@@ -2755,6 +1992,18 @@ async def run_mispricing_mode(clob: ClobClient):
                                 )
                             except Exception as _e:
                                 logger.warning(f"[EXIT] Sell order error {_d.position.condition_id[:8]}: {_e}")
+
+                        _exit_alert = get_alert()
+                        if _exit_alert:
+                            await _exit_alert.alert_exit(
+                                question    = _d.position.question,
+                                outcome     = _d.position.outcome,
+                                entry_price = float(_d.position.entry_price),
+                                exit_price  = float(_d.position.current_price),
+                                pnl_usdc    = float(_d.estimated_pnl_usdc or 0),
+                                reason      = _d.reason,
+                                session     = session,
+                            )
                 except Exception as _e:
                     logger.warning(f"[EXIT EVAL] Error: {_e}")
 
@@ -2806,10 +2055,9 @@ async def run_mispricing_mode(clob: ClobClient):
 
                 if can_enter:
                     log.info("[bold]── UP/DOWN HOURLY ───────────────────────────────[/bold]")
-                    _cleanup_old_slots()
-                    _cleanup_reentry_candidates()
+                    cleanup_old_slots()
+                    cleanup_reentry_candidates()
 
-                    # Per-symbol multi-TF momentum (parallel fetch for entire basket)
                     from src.logic.updown_strategy import calculate_multi_tf_momentum as _mtf_mom
                     from src.logic.regime_filter import CRYPTO_BASKET
                     _mtf_tasks = [_mtf_mom(s, session) for s in CRYPTO_BASKET]
@@ -2831,7 +2079,6 @@ async def run_mispricing_mode(clob: ClobClient):
                         else:
                             log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → NEUTRAL")
 
-                    # Scalping signal untuk BTC dihitung SEKALI per cycle, bukan per-market
                     _btc_scalp = None
                     try:
                         from src.logic.updown_strategy import calculate_scalping_signals as _csc
@@ -2847,7 +2094,6 @@ async def run_mispricing_mode(clob: ClobClient):
                     except Exception as _e:
                         logger.debug(f"[SCALP] BTC signal error: {_e}")
 
-                    # Market regime filter — skip ALL contrarian entries if trending regime
                     _market_regime = None
                     try:
                         from src.logic.regime_filter import detect_market_regime
@@ -2866,15 +2112,18 @@ async def run_mispricing_mode(clob: ClobClient):
                     except Exception as _e:
                         logger.warning(f"[MARKET REGIME] Error: {_e}")
 
-                    hourly_markets = await _scan_updown_hourly_markets(session, gamma)
-                    log.info(f"[UPDOWN HOURLY] {len(hourly_markets)} active market")
+                    hourly_markets, candle_markets = await asyncio.gather(
+                        scan_updown_hourly_markets(session, gamma),
+                        scan_candle_markets(session, gamma),
+                    )
+                    log.info(
+                        f"[UPDOWN] hourly={len(hourly_markets)} candle={len(candle_markets)} active"
+                    )
 
                     _market_session_label = (
                         _market_regime["session"]["session"] if _market_regime else "US_MAIN"
                     )
 
-                    # skip_contrarian only applies to legacy contrarian mode.
-                    # GBM benefits from trending markets (rides the trend) — bypass gate.
                     _gbm_active = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
                     if (
                         _market_regime and _market_regime.get("skip_contrarian")
@@ -2901,28 +2150,25 @@ async def run_mispricing_mode(clob: ClobClient):
                             except Exception as e:
                                 logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")
 
-                        # Re-entry scanner — monitor profit-locked markets for mispricing
-                        if _reentry_candidates:
+                        for cm in candle_markets:
+                            try:
+                                await analyze_candle_market(
+                                    cm, clob, gamma, sizer, manager,
+                                    breaker, capital, session,
+                                    open_position_lock=_open_position_lock,
+                                    closed_this_cycle=closed_this_cycle,
+                                    candle_sl_markets=_candle_sl_markets,
+                                    vol_data=vol_data,
+                                )
+                            except Exception as _ce:
+                                logger.warning(f"[CANDLE UPDOWN] Error analyze {cm.get('_symbol','?')}: {_ce}")
+
+                        if reentry_candidates:
                             await _scan_reentry_opportunities(
                                 clob, sizer, manager, breaker, capital, session,
                                 btc_scalp=_btc_scalp,
                                 symbol_momentum_map=symbol_momentum_map,
                             )
-
-                    # ── Candle strategy: bitcoin-up-or-down-* (1h candle green/red) ──
-                    if getattr(config, "CANDLE_UPDOWN_ENABLED", True):
-                        candle_markets = await _scan_updown_candle_markets(session, gamma)
-                        log.info(f"[CANDLE UPDOWN] {len(candle_markets)} active candle market")
-                        for cm in candle_markets:
-                            try:
-                                await _analyze_updown_candle_market(
-                                    cm, clob, gamma, sizer, manager,
-                                    breaker, capital, session,
-                                    closed_this_cycle=closed_this_cycle,
-                                    candle_sl_markets=_candle_sl_markets,
-                                )
-                            except Exception as _ce:
-                                logger.warning(f"[CANDLE UPDOWN] Error analyze {cm.get('_symbol','?')}: {_ce}")
 
             except asyncio.CancelledError:
                 raise
@@ -2968,28 +2214,6 @@ def main():
         asyncio.run(_run())
     except (KeyboardInterrupt, SystemExit):
         pass
-
-def _extract_price_target(question: str) -> float | None:
-    patterns = [
-        r'\$([0-9]{1,3}(?:,[0-9]{3})+)',
-        r'\$([0-9]+(?:\.[0-9]+)?)[kK]',
-        r'\$([0-9]{4,})',
-        r'[↑↓]\s*([0-9]{1,3}(?:,[0-9]{3})+)',
-        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)[kK]',
-        r'[↑↓]\s*([0-9]+(?:\.[0-9]+)?)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, question)
-        if match:
-            raw = match.group(1).replace(",", "")
-            try:
-                value = float(raw)
-                if 'k' in question[match.start():match.end()].lower():
-                    value *= 1000
-                return value
-            except ValueError:
-                continue
-    return None
 
 if __name__ == "__main__":
     main()
