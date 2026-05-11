@@ -2117,7 +2117,7 @@ async def run_mispricing_mode(clob: ClobClient):
                         scan_candle_markets(session, gamma),
                     )
                     log.info(
-                        f"[UPDOWN] hourly={len(hourly_markets)} candle={len(candle_markets)} active"
+                        f"[UPDOWN] hourly={len(hourly_markets)} active"
                     )
 
                     _market_session_label = (
