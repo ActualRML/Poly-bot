@@ -2050,40 +2050,6 @@ async def run_mispricing_mode(clob: ClobClient):
                                 f"{_d.position.outcome} SL'd — queued for reverse re-entry"
                             )
 
-                        if (_d.signal == _XS.EXIT_CATASTROPHIC
-                                and _d.position.strategy_mode in (
-                                    "updown_hourly", "updown_hourly_dry_run"
-                                )
-                                and float(_d.estimated_pnl_usdc or 0) < 0):
-                            _fq_pnl = (
-                                (float(_d.position.current_price) - float(_d.position.entry_price))
-                                / float(_d.position.entry_price) * 100
-                            )
-                            _fq_mins = (
-                                (_d.position.resolve_date - datetime.now(timezone.utc))
-                                .total_seconds() / 60
-                            )
-                            _fq_opp  = round(1.0 - float(_d.position.current_price), 4)
-                            if (
-                                _fq_pnl  <= config.HOURLY_FLIP_TRIGGER_PCT
-                                and _fq_mins >= config.HOURLY_FLIP_MIN_MINUTES
-                                and _fq_opp  <= config.HOURLY_FLIP_MAX_ENTRY
-                            ):
-                                _fq_dir = "Down" if _d.position.outcome == "Up" else "Up"
-                                _hourly_flip_queue[_d.position.condition_id] = {
-                                    "flip_to":          _fq_dir,
-                                    "flip_price":       _fq_opp,
-                                    "original_capital": float(_d.position.capital_at_risk),
-                                    "resolve_date":     _d.position.resolve_date,
-                                    "question":         _d.position.question,
-                                    "symbol":           detect_symbol_from_question(_d.position.question),
-                                }
-                                log.info(
-                                    f"[FLIP] {_d.position.condition_id[:8]} queued: "
-                                    f"{_d.position.outcome}→{_fq_dir} @ {_fq_opp:.3f} "
-                                    f"(pnl {_fq_pnl:.0f}%, {_fq_mins:.0f}m left)"
-                                )
-
                         if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
                             "updown_hourly", "updown_hourly_dry_run"
                         ):
@@ -2115,6 +2081,149 @@ async def run_mispricing_mode(clob: ClobClient):
                             )
                 except Exception as _e:
                     logger.warning(f"[EXIT EVAL] Error: {_e}")
+
+                # --- Hourly flip early-exit scan ---
+                try:
+                    from src.models.database import (
+                        close_position as _fp_close,
+                        log_trade as _fp_log,
+                        resolve_prediction as _fp_resolve,
+                        get_open_positions as _fp_get_open,
+                    )
+                    _fp_trigger  = config.HOURLY_FLIP_TRIGGER_PCT
+                    _fp_min_mins = config.HOURLY_FLIP_MIN_MINUTES
+                    _fp_max_ent  = config.HOURLY_FLIP_MAX_ENTRY
+
+                    for _fp in _fp_get_open():
+                        if _fp.get("strategy_mode") not in (
+                            "updown_hourly", "updown_hourly_dry_run"
+                        ):
+                            continue
+                        _fp_cid = _fp["condition_id"]
+                        if _fp_cid in _hourly_flip_queue:
+                            continue
+                        _fp_outcome = _fp.get("outcome", "")
+                        _fp_ent     = float(_fp.get("entry_price") or 0)
+                        _fp_cur     = float(
+                            current_prices.get(_fp_cid, {}).get(_fp_outcome, Decimal("0"))
+                        )
+                        if _fp_ent <= 0 or _fp_cur <= 0:
+                            continue
+                        _fp_pnl_pct = (_fp_cur - _fp_ent) / _fp_ent * 100
+                        try:
+                            _fp_resolve_dt = datetime.fromisoformat(
+                                str(_fp.get("resolve_date", "")).replace("Z", "+00:00")
+                            )
+                            if _fp_resolve_dt.tzinfo is None:
+                                _fp_resolve_dt = _fp_resolve_dt.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            continue
+                        _fp_mins_left = (
+                            _fp_resolve_dt - datetime.now(timezone.utc)
+                        ).total_seconds() / 60
+                        _fp_opp_price = round(1.0 - _fp_cur, 4)
+
+                        if not (
+                            _fp_pnl_pct  <= _fp_trigger
+                            and _fp_mins_left >= _fp_min_mins
+                            and _fp_opp_price <= _fp_max_ent
+                        ):
+                            continue
+
+                        _fp_shares_val = float(_fp.get("shares") or 0)
+                        _fp_cap        = float(_fp.get("capital_at_risk") or 0)
+                        _fp_pnl_usdc   = Decimal(str(round(
+                            (_fp_cur - _fp_ent) * _fp_shares_val, 4
+                        )))
+                        _fp_question   = _fp.get("question", "")
+                        _fp_sym        = detect_symbol_from_question(_fp_question)
+
+                        _fp_close(
+                            condition_id = _fp_cid,
+                            outcome      = _fp_outcome,
+                            exit_price   = Decimal(str(_fp_cur)),
+                            exit_reason  = "flip_early_exit",
+                            pnl_usdc     = _fp_pnl_usdc,
+                        )
+                        _fp_log({
+                            "condition_id": _fp_cid,
+                            "question":     _fp_question,
+                            "outcome":      _fp_outcome,
+                            "action":       "exit",
+                            "price":        _fp_cur,
+                            "shares":       _fp_shares_val,
+                            "usdc_amount":  float(_fp_pnl_usdc),
+                            "notes": (
+                                f"flip_early_exit pnl={_fp_pnl_pct:.1f}% "
+                                f"{_fp_mins_left:.0f}m left"
+                            ),
+                        })
+                        _fp_resolve(
+                            condition_id  = _fp_cid,
+                            outcome       = _fp_outcome,
+                            won           = False,
+                            resolve_price = _fp_cur,
+                        )
+                        try:
+                            breaker.record_trade(float(_fp_pnl_usdc))
+                        except Exception:
+                            pass
+                        if _fp_sym != "UNKNOWN":
+                            maybe_blacklist_symbol(_fp_sym)
+
+                        log.info(
+                            f"[EXIT] ❌ FLIP_EARLY_EXIT — {_fp_question[:40]} | "
+                            f"{_fp_outcome} @ {_fp_ent:.3f}→{_fp_cur:.3f} | "
+                            f"PnL ${float(_fp_pnl_usdc):+.2f} | "
+                            f"{_fp_pnl_pct:.0f}% {_fp_mins_left:.0f}m left"
+                        )
+
+                        _fp_direction = "Down" if _fp_outcome == "Up" else "Up"
+                        _hourly_flip_queue[_fp_cid] = {
+                            "flip_to":          _fp_direction,
+                            "flip_price":       _fp_opp_price,
+                            "original_capital": _fp_cap,
+                            "resolve_date":     _fp_resolve_dt,
+                            "question":         _fp_question,
+                            "symbol":           _fp_sym,
+                        }
+                        log.info(
+                            f"[FLIP] {_fp_cid[:8]} queued: "
+                            f"{_fp_outcome}→{_fp_direction} @ ~{_fp_opp_price:.3f} "
+                            f"({_fp_mins_left:.0f}m left)"
+                        )
+
+                        _exit_alert = get_alert()
+                        if _exit_alert:
+                            await _exit_alert.alert_exit(
+                                question    = _fp_question,
+                                outcome     = _fp_outcome,
+                                entry_price = _fp_ent,
+                                exit_price  = _fp_cur,
+                                pnl_usdc    = float(_fp_pnl_usdc),
+                                reason      = (
+                                    f"flip early exit "
+                                    f"({_fp_pnl_pct:.0f}%, {_fp_mins_left:.0f}m left)"
+                                ),
+                                session     = session,
+                            )
+
+                        if not config.DRY_RUN and _fp.get("token_id"):
+                            try:
+                                from src.logic.pricing import ke_decimal as _fped
+                                clob.pasang_order(
+                                    sisi     = SisiOrder.JUAL,
+                                    harga    = _fped(str(_fp_cur)),
+                                    ukuran   = Decimal(str(_fp_shares_val)),
+                                    token_id = _fp["token_id"],
+                                )
+                            except Exception as _fse:
+                                logger.warning(
+                                    f"[FLIP] Sell order error {_fp_cid[:8]}: {_fse}"
+                                )
+
+                except Exception as _fe:
+                    logger.warning(f"[FLIP SCAN] Error: {_fe}")
 
                 if config.CB_ENABLED:
                     cb_status = breaker.check(unrealized_pnl=manager.get_unrealized_pnl())
@@ -2234,156 +2343,152 @@ async def run_mispricing_mode(clob: ClobClient):
                     )
 
                     # --- Hourly flip queue processor ---
-                    for _fcid in list(_hourly_flip_queue.keys()):
-                        _fq = _hourly_flip_queue[_fcid]
-                        _f_mins = (
-                            (_fq["resolve_date"] - datetime.now(timezone.utc))
-                            .total_seconds() / 60
-                        )
-                        if _f_mins < config.HOURLY_FLIP_MIN_MINUTES:
-                            log.info(f"[FLIP] {_fcid[:8]} expired ({_f_mins:.0f}m left)")
-                            _hourly_flip_queue.pop(_fcid)
-                            continue
+                    if _hourly_flip_queue:
+                        import json as _fjson
+                        for _fcid in list(_hourly_flip_queue.keys()):
+                            try:
+                                _fq     = _hourly_flip_queue[_fcid]
+                                _f_mins = (
+                                    _fq["resolve_date"] - datetime.now(timezone.utc)
+                                ).total_seconds() / 60
 
-                        _f_market = next(
-                            (m for m in hourly_markets
-                             if m.get("conditionId", m.get("id", "")) == _fcid),
-                            None,
-                        )
-                        if _f_market is None:
-                            _hourly_flip_queue.pop(_fcid)
-                            continue
-
-                        # Cooldown guard
-                        _f_last_exec = _hourly_flip_last_exec.get(_fcid)
-                        if (_f_last_exec and
-                                (datetime.now(timezone.utc) - _f_last_exec).total_seconds() / 60
-                                < config.HOURLY_FLIP_COOLDOWN_MINUTES):
-                            continue
-
-                        # Momentum filter (m_5m): flip→Down needs bearish, flip→Up needs bullish
-                        _f_sym_key  = (_fq.get("symbol") or "").upper()
-                        _f_mom_data = (symbol_momentum_map or {}).get(_f_sym_key, {})
-                        _f_m5       = _f_mom_data.get("m_5m", None)
-                        if _f_m5 is None:
-                            log.info(f"[FLIP] {_fcid[:8]} wait: no m_5m for {_f_sym_key}")
-                            continue
-                        _f_want_bearish = _fq["flip_to"] == "Down"
-                        if _f_want_bearish and _f_m5 >= 0:
-                            log.info(
-                                f"[FLIP] {_fcid[:8]} skip: →Down but m_5m={_f_m5:+.4f} (bullish)"
-                            )
-                            continue
-                        if not _f_want_bearish and _f_m5 <= 0:
-                            log.info(
-                                f"[FLIP] {_fcid[:8]} skip: →Up but m_5m={_f_m5:+.4f} (bearish)"
-                            )
-                            continue
-
-                        # Live price check + price buffer guard
-                        _f_tokens  = _f_market.get("tokens", [])
-                        _f_tok_obj = next(
-                            (t for t in _f_tokens if t.get("outcome") == _fq["flip_to"]), None
-                        )
-                        if not _f_tok_obj:
-                            _hourly_flip_queue.pop(_fcid)
-                            continue
-                        _f_token_id = (
-                            _f_tok_obj.get("token_id")
-                            or _f_tok_obj.get("tokenId")
-                            or _f_tok_obj.get("id", "")
-                        )
-                        _f_live_price = float(
-                            _f_tok_obj.get("price", _fq["flip_price"])
-                        )
-                        if _f_live_price > config.HOURLY_FLIP_MAX_ENTRY:
-                            log.info(
-                                f"[FLIP] {_fcid[:8]} pop: {_fq['flip_to']} @ {_f_live_price:.3f}"
-                                f" > max {config.HOURLY_FLIP_MAX_ENTRY}"
-                            )
-                            _hourly_flip_queue.pop(_fcid)
-                            continue
-                        if _f_live_price > _fq["flip_price"] * (1 + config.HOURLY_FLIP_PRICE_BUFFER_PCT):
-                            log.info(
-                                f"[FLIP] {_fcid[:8]} pop: slippage {_f_live_price:.3f}"
-                                f" vs queued {_fq['flip_price']:.3f}"
-                            )
-                            _hourly_flip_queue.pop(_fcid)
-                            continue
-
-                        # Spread guard (optional — only if clob exposes get_spread)
-                        try:
-                            if hasattr(clob, "get_spread"):
-                                _f_spread = clob.get_spread(_f_token_id)
-                                if _f_spread is not None and _f_spread > config.HOURLY_FLIP_MAX_SPREAD:
-                                    log.info(
-                                        f"[FLIP] {_fcid[:8]} skip: spread {_f_spread:.3f}"
-                                        f" > {config.HOURLY_FLIP_MAX_SPREAD}"
-                                    )
+                                if _f_mins < 5:
+                                    log.info(f"[FLIP] {_fcid[:8]} expired")
+                                    _hourly_flip_queue.pop(_fcid)
                                     continue
-                        except Exception:
-                            pass
 
-                        # Entry
-                        _f_capital = _fq["original_capital"] * 0.5
-                        _f_shares  = Decimal(str(round(_f_capital / _f_live_price, 4)))
-                        _f_cap_dec = Decimal(str(round(_f_capital, 4)))
-                        _f_mode    = "updown_hourly_dry_run" if config.DRY_RUN else "updown_hourly"
-                        _f_sym     = _fq.get("symbol") or "?"
+                                if check_symbol_blacklist(_fq.get("symbol", "")):
+                                    log.info(f"[FLIP] {_fcid[:8]} skip — blacklisted")
+                                    _hourly_flip_queue.pop(_fcid)
+                                    continue
 
-                        async with _open_position_lock:
-                            if not manager.can_open(capital=_f_capital):
-                                continue
+                                _f_market = next(
+                                    (m for m in hourly_markets
+                                     if m.get("conditionId", m.get("id", "")) == _fcid),
+                                    None,
+                                )
+                                if _f_market is None:
+                                    _hourly_flip_queue.pop(_fcid)
+                                    continue
 
-                            if config.DRY_RUN:
-                                manager.open_position(
-                                    condition_id    = _fcid,
-                                    question        = _fq["question"],
-                                    outcome         = _fq["flip_to"],
-                                    entry_price     = Decimal(str(_f_live_price)),
-                                    shares          = _f_shares,
-                                    capital_at_risk = _f_cap_dec,
-                                    resolve_date    = _fq["resolve_date"],
-                                    gap_pct         = 0.0,
-                                    kelly_fraction  = 0.5,
-                                    strategy_mode   = _f_mode,
-                                    token_id        = _f_token_id,
-                                )
-                                record_slot_entry(_fq["resolve_date"])
-                                log.info(
-                                    f"[FLIP DRY] {_f_sym} {_fq['flip_to']} @ {_f_live_price:.3f}"
-                                    f" cap ${_f_capital:.2f} ({_f_mins:.0f}m left)"
-                                )
-                            else:
-                                from src.logic.pricing import ke_decimal as _fked
-                                _f_order = clob.pasang_order(
-                                    sisi     = SisiOrder.BELI,
-                                    harga    = _fked(str(_f_live_price)),
-                                    ukuran   = _f_shares,
-                                    token_id = _f_token_id,
-                                )
-                                if _f_order:
-                                    manager.open_position(
-                                        condition_id    = _fcid,
-                                        question        = _fq["question"],
-                                        outcome         = _fq["flip_to"],
-                                        entry_price     = Decimal(str(_f_live_price)),
-                                        shares          = _f_shares,
-                                        capital_at_risk = _f_cap_dec,
-                                        resolve_date    = _fq["resolve_date"],
-                                        gap_pct         = 0.0,
-                                        kelly_fraction  = 0.5,
-                                        strategy_mode   = _f_mode,
-                                        token_id        = _f_token_id,
+                                # Live price from market outcomePrices
+                                _f_outcomes = _f_market.get("outcomes", [])
+                                _f_op       = _f_market.get("outcomePrices", [])
+                                if isinstance(_f_outcomes, str):
+                                    try: _f_outcomes = _fjson.loads(_f_outcomes)
+                                    except: _f_outcomes = []
+                                if isinstance(_f_op, str):
+                                    try: _f_op = _fjson.loads(_f_op)
+                                    except: _f_op = []
+                                _f_out_lower  = [str(o).lower() for o in _f_outcomes]
+                                _f_flip_lower = _fq["flip_to"].lower()
+                                if _f_flip_lower in _f_out_lower:
+                                    _f_idx   = _f_out_lower.index(_f_flip_lower)
+                                    _f_price = (
+                                        float(_f_op[_f_idx])
+                                        if _f_idx < len(_f_op)
+                                        else _fq["flip_price"]
                                     )
-                                    record_slot_entry(_fq["resolve_date"])
+                                else:
+                                    _f_price = _fq["flip_price"]
+
+                                if _f_price > config.HOURLY_FLIP_MAX_ENTRY:
                                     log.info(
-                                        f"[FLIP] ✅ {_f_sym} {_fq['flip_to']} @ {_f_live_price:.3f}"
-                                        f" cap ${_f_capital:.2f} ({_f_mins:.0f}m left)"
+                                        f"[FLIP] {_fcid[:8]} pop: price {_f_price:.3f}"
+                                        f" > max {config.HOURLY_FLIP_MAX_ENTRY}"
                                     )
+                                    _hourly_flip_queue.pop(_fcid)
+                                    continue
 
-                            _hourly_flip_last_exec[_fcid] = datetime.now(timezone.utc)
-                            _hourly_flip_queue.pop(_fcid, None)
+                                # Token ID
+                                _f_token_ids = gamma.extract_token_ids(_f_market)
+                                _f_token_id  = _f_token_ids.get(_fq["flip_to"], "")
+
+                                # Sizing
+                                _f_capital = _fq["original_capital"] * 0.5
+                                _f_cap_dec = Decimal(str(round(_f_capital, 4)))
+                                _f_shares  = (_f_cap_dec / Decimal(str(_f_price))).quantize(
+                                    Decimal("0.0001")
+                                )
+                                _f_mode = (
+                                    "updown_hourly_dry_run" if config.DRY_RUN else "updown_hourly"
+                                )
+                                _f_sym = _fq.get("symbol", "?")
+
+                                async with _open_position_lock:
+                                    _can, _reason = manager.can_open(
+                                        condition_id  = _fcid,
+                                        outcome       = _fq["flip_to"],
+                                        bet_usdc      = _f_cap_dec,
+                                        total_capital = Decimal(str(capital)),
+                                    )
+                                    if not _can:
+                                        log.info(f"[FLIP] {_fcid[:8]} wait: {_reason}")
+                                        continue
+
+                                    if config.DRY_RUN:
+                                        manager.open_position(
+                                            condition_id    = _fcid,
+                                            question        = _fq["question"],
+                                            outcome         = _fq["flip_to"],
+                                            entry_price     = Decimal(str(_f_price)),
+                                            shares          = _f_shares,
+                                            capital_at_risk = _f_cap_dec,
+                                            resolve_date    = _fq["resolve_date"],
+                                            gap_pct         = 0.0,
+                                            kelly_fraction  = 0.5,
+                                            strategy_mode   = _f_mode,
+                                            token_id        = _f_token_id,
+                                        )
+                                        record_slot_entry(_fq["resolve_date"])
+                                        log.info(
+                                            f"[FLIP DRY] {_f_sym} {_fq['flip_to']}"
+                                            f" @ {_f_price:.3f} cap ${_f_capital:.2f}"
+                                            f" ({_f_mins:.0f}m left)"
+                                        )
+                                    else:
+                                        if not _f_token_id:
+                                            logger.warning(
+                                                f"[FLIP] token_id missing {_fcid[:8]}"
+                                            )
+                                            _hourly_flip_queue.pop(_fcid, None)
+                                            continue
+                                        from src.logic.pricing import ke_decimal as _fked2
+                                        _f_order = clob.pasang_order(
+                                            sisi     = SisiOrder.BELI,
+                                            harga    = _fked2(str(_f_price)),
+                                            ukuran   = _f_shares,
+                                            token_id = _f_token_id,
+                                        )
+                                        if _f_order:
+                                            manager.open_position(
+                                                condition_id    = _fcid,
+                                                question        = _fq["question"],
+                                                outcome         = _fq["flip_to"],
+                                                entry_price     = Decimal(str(_f_price)),
+                                                shares          = _f_shares,
+                                                capital_at_risk = _f_cap_dec,
+                                                resolve_date    = _fq["resolve_date"],
+                                                gap_pct         = 0.0,
+                                                kelly_fraction  = 0.5,
+                                                strategy_mode   = _f_mode,
+                                                token_id        = _f_token_id,
+                                            )
+                                            record_slot_entry(_fq["resolve_date"])
+                                            log.info(
+                                                f"[FLIP] ✅ {_f_sym} {_fq['flip_to']}"
+                                                f" @ {_f_price:.3f} cap ${_f_capital:.2f}"
+                                                f" ({_f_mins:.0f}m left)"
+                                            )
+                                        else:
+                                            logger.warning(
+                                                f"[FLIP] Order failed {_fcid[:8]}"
+                                            )
+
+                                _hourly_flip_queue.pop(_fcid, None)
+
+                            except Exception as _fpe:
+                                logger.warning(f"[FLIP PROC] {_fcid[:8]}: {_fpe}")
 
                     _market_session_label = (
                         _market_regime["session"]["session"] if _market_regime else "US_MAIN"
