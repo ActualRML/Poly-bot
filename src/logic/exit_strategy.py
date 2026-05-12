@@ -129,9 +129,9 @@ class ExitEvaluator:
         # Profit lock for hourly — fire pada profit besar, otherwise hold to resolve.
         # T1 (≥200%): near-max ITM, kunci kapan saja >5m left
         # T2 (≥150%): substantial profit, kunci kalau masih banyak waktu (>15m)
-        hourly_lock_t1_pct: float = 150.0,
+        hourly_lock_t1_pct: float = 80.0,
         hourly_lock_t1_min_remaining: float = 5.0,
-        hourly_lock_t2_pct: float = 100.0,
+        hourly_lock_t2_pct: float = 50.0,
         hourly_lock_t2_min_remaining: float = 15.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
@@ -191,7 +191,7 @@ class ExitEvaluator:
 
             # Profit lock: vol-scaled — DOGE locks at lower PnL, wider time gate
             _clock_t1_pct     = max(self.hourly_lock_t1_pct     / _cscale, 80.0)
-            _clock_t2_pct     = max(self.hourly_lock_t2_pct     / _cscale, 60.0)
+            _clock_t2_pct     = max(self.hourly_lock_t2_pct     / _cscale, 40.0)
             _clock_t1_min_rem = self.hourly_lock_t1_min_remaining * _cscale
             _clock_t2_min_rem = self.hourly_lock_t2_min_remaining * _cscale
             if pnl_pct >= _clock_t1_pct and mins > _clock_t1_min_rem:
@@ -233,7 +233,7 @@ class ExitEvaluator:
             _t3_pct = max(self.hourly_late_sl_t3_pct * _scale, -60.0)
             # TP: higher vol → lock sooner (lower PnL threshold, wider time gate)
             _lock_t1_pct     = max(self.hourly_lock_t1_pct     / _scale, 80.0)
-            _lock_t2_pct     = max(self.hourly_lock_t2_pct     / _scale, 60.0)
+            _lock_t2_pct     = max(self.hourly_lock_t2_pct     / _scale, 40.0)
             _lock_t1_min_rem = self.hourly_lock_t1_min_remaining * _scale
             _lock_t2_min_rem = self.hourly_lock_t2_min_remaining * _scale
 
@@ -243,8 +243,14 @@ class ExitEvaluator:
             # T3 (10-20m, OUTER):  PnL ≤ -30%  → cut early, redeploy capital
             # T2 (5-10m,  MIDDLE): PnL ≤ -50%
             # T1 (0-5m,   INNER):  PnL ≤ -70%  → only extreme, slippage too costly otherwise
+            #
+            # T3 punya min age guard: late entry (masuk <10m sebelum T3 window) tidak
+            # langsung kena SL — posisi butuh ruang napas sebelum dievaluasi.
+            _age_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
+            _sl_min_age = getattr(config, "HOURLY_SL_MIN_AGE_MINUTES", 10.0)
             if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
-                    and pnl_pct <= _t3_pct):
+                    and pnl_pct <= _t3_pct
+                    and _age_min >= _sl_min_age):
                 return ExitDecision(
                     signal=ExitSignal.EXIT_CATASTROPHIC,
                     should_exit=True,

@@ -8,6 +8,10 @@ from src.logic.pricing import ke_decimal
 from src.utils.config import config
 from src.utils.logger import log
 
+import time as _time
+_empty_ob_warned: dict[str, float] = {}
+_EMPTY_OB_WARN_TTL = 1800.0
+
 class ClobClient:
 
     def __init__(self):
@@ -77,7 +81,13 @@ class ClobClient:
             asks = buku.asks or []
 
             if not bids or not asks:
-                log.warning(f"[yellow]Order book kosong untuk token {token_id[:12]}[/yellow]")
+                _now = _time.monotonic()
+                _last = _empty_ob_warned.get(token_id, 0.0)
+                if _now - _last > _EMPTY_OB_WARN_TTL:
+                    log.warning(f"[yellow]Order book kosong untuk token {token_id[:12]}[/yellow]")
+                    _empty_ob_warned[token_id] = _now
+                else:
+                    log.debug(f"Order book masih kosong untuk token {token_id[:12]} (suppressed)")
                 return None
 
             best_bid = ke_decimal(str(bids[-1].price))

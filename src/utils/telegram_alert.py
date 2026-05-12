@@ -49,11 +49,12 @@ class TelegramAlert:
                 if resp.status == 200:
                     return True
                 else:
-                    logger.warning(f"[TELEGRAM] Gagal kirim: status {resp.status}")
+                    body = await resp.text()
+                    logger.warning(f"[TELEGRAM] Gagal kirim: status {resp.status} — {body[:200]}")
                     return False
 
         except Exception as e:
-            logger.warning(f"[TELEGRAM] Error: {e}")
+            logger.warning(f"[TELEGRAM] Error: {type(e).__name__}: {e}")
             return False
 
     async def alert_signal(
@@ -67,7 +68,7 @@ class TelegramAlert:
         session: aiohttp.ClientSession,
         dry_run: bool = True,
         strategy: str = "",
-    ):
+    ) -> bool:
 
         mode   = "🔸 DRY RUN" if dry_run else "🟢 LIVE"
         label  = f" <i>({html.escape(strategy)})</i>" if strategy else ""
@@ -80,7 +81,7 @@ class TelegramAlert:
             f"⚡ EV       : {ev:.3f}\n\n"
             f"🕐 {_ts()}"
         )
-        await self.send(msg, session)
+        return await self.send(msg, session)
 
     async def alert_exit(
         self,
@@ -103,7 +104,7 @@ class TelegramAlert:
             f"📝 Alasan   : {html.escape(reason)}\n\n"
             f"🕐 {_ts()}"
         )
-        await self.send(msg, session)
+        return await self.send(msg, session)
 
     async def alert_circuit_breaker(
         self,
@@ -119,7 +120,7 @@ class TelegramAlert:
             f"📝 Alasan   : {html.escape(reason)}\n\n"
             f"🕐 {_ts()}"
         )
-        await self.send(msg, session)
+        return await self.send(msg, session)
 
     async def alert_daily_summary(
         self,
@@ -141,7 +142,7 @@ class TelegramAlert:
             f"🎯 Win Rate  : {winrate:.1f}%\n\n"
             f"🕐 {_ts_full()}"
         )
-        await self.send(msg, session)
+        return await self.send(msg, session)
 
     async def alert_error(
         self,
@@ -154,7 +155,7 @@ class TelegramAlert:
             f"<code>{html.escape(error_msg[:200])}</code>\n\n"
             f"🕐 {_ts()}"
         )
-        await self.send(msg, session)
+        return await self.send(msg, session)
 
 _alert_instance: Optional[TelegramAlert] = None
 

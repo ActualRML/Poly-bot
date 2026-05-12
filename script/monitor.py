@@ -90,7 +90,13 @@ def main():
                 status = "➡️"
 
             print(f"\n   {status} {pos['question'][:52]}")
-            print(f"      Outcome  : {pos['outcome']} | Edge saat entry: {gap_pct:.1f}%")
+            _strat = pos.get("strategy_mode", "")
+            _gap_label = (
+                "GBM edge" if "hourly" in _strat
+                else "BTC mom" if "candle" in _strat
+                else "Gap"
+            )
+            print(f"      Outcome  : {pos['outcome']} | {_gap_label}: {gap_pct:.1f}%")
             print(f"      Entry    : {entry:.3f} | Current: {current:.3f} | "
                   f"PnL: ${pnl_pos:+.2f} ({pnl_pct:+.1f}%)")
             print(f"      Capital  : ${capital:.2f} | "
@@ -140,8 +146,11 @@ def main():
             v = float(p.get("gap_pct") or 0)
             return v * 100 if v <= 1.0 else v
 
-        high_edge = [p for p in positions if _edge(p) > 15]
-        low_edge  = [p for p in positions if _edge(p) < 5]
+        def _is_gbm(p):
+            return "hourly" in (p.get("strategy_mode") or "")
+
+        high_edge = [p for p in positions if _is_gbm(p) and _edge(p) > 15]
+        low_edge  = [p for p in positions if _is_gbm(p) and _edge(p) < 5]
 
         if high_edge:
             print(f"   🔥 Edge tinggi (>15%) — hold!")
@@ -151,8 +160,11 @@ def main():
             print(f"   ⚠️  Edge rendah (<5%) — monitor ketat")
             for p in low_edge:
                 print(f"      • {p['question'][:50]} | {p['outcome']} | edge {_edge(p):.1f}%")
-        if not high_edge and not low_edge:
-            print(f"   ✅ Semua posisi dalam range normal (5-15% edge)")
+        gbm_positions = [p for p in positions if _is_gbm(p)]
+        if gbm_positions and not high_edge and not low_edge:
+            print(f"   ✅ Semua posisi GBM dalam range normal (5-15% edge)")
+        elif not gbm_positions:
+            print(f"   ℹ️  Tidak ada posisi GBM hourly aktif")
 
     print("\n" + "=" * 65)
     print("  Jalankan bot : python -m src.main")

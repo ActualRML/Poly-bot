@@ -66,7 +66,7 @@ def test_hold_when_no_trigger():
     assert not d.should_exit
     assert d.signal == ExitSignal.HOLD
 
-def make_hourly_position(strategy_mode: str, current: float, highest: float, minutes_left: int = 15) -> Position:
+def make_hourly_position(strategy_mode: str, current: float, highest: float, minutes_left: int = 15, entry_age_minutes: float = 25.0) -> Position:
     return Position(
         condition_id="0xHOURLY",
         outcome="Up",
@@ -76,7 +76,7 @@ def make_hourly_position(strategy_mode: str, current: float, highest: float, min
         shares=Decimal("22.22"),
         capital_at_risk=Decimal("10.00"),
         resolve_date=datetime.now(timezone.utc) + timedelta(minutes=minutes_left),
-        entry_time=datetime.now(timezone.utc) - timedelta(minutes=25),
+        entry_time=datetime.now(timezone.utc) - timedelta(minutes=entry_age_minutes),
         strategy_mode=strategy_mode,
     )
 
@@ -121,11 +121,12 @@ def test_updown_hourly_late_sl_inner_holds_on_moderate_loss(strategy_mode):
     assert d.should_exit is False
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_holds_near_expiry(strategy_mode):
+def test_updown_hourly_tp_t1_fires_at_near_expiry(strategy_mode):
+    # entry=0.45 current=0.88 → PnL=95.6% > T1(80%) with 15m > 5m gate → T1 fires
     pos = make_hourly_position(strategy_mode, current=0.88, highest=0.95, minutes_left=15)
     d = evaluator.evaluate(pos)
-    assert d.should_exit is False
-    assert d.signal == ExitSignal.HOLD
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
 def test_updown_hourly_no_fixed_profit_lock(strategy_mode):
@@ -135,11 +136,20 @@ def test_updown_hourly_no_fixed_profit_lock(strategy_mode):
     assert d.signal == ExitSignal.HOLD
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_updown_hourly_no_fixed_profit_lock_high(strategy_mode):
-    pos = make_hourly_position(strategy_mode, current=0.70, highest=0.70, minutes_left=25)
+def test_updown_hourly_holds_below_tp_t2_threshold(strategy_mode):
+    # entry=0.45 current=0.61 → PnL=35.6% < T2(50%) → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.61, highest=0.61, minutes_left=25)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
     assert d.signal == ExitSignal.HOLD
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_updown_hourly_tp_t2_fires_above_threshold(strategy_mode):
+    # entry=0.45 current=0.70 → PnL=55.6% > T2(50%) with 20m > 15m gate → T2 fires
+    pos = make_hourly_position(strategy_mode, current=0.70, highest=0.70, minutes_left=20)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_LOCK_PROFIT
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
 def test_updown_hourly_holds_under_trailing_threshold(strategy_mode):
@@ -167,8 +177,9 @@ def test_hourly_always_holds_regardless_of_pnl(strategy_mode):
     assert d.signal == ExitSignal.HOLD
 
 @pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
-def test_hourly_holds_even_at_high_profit(strategy_mode):
-    pos = make_hourly_position(strategy_mode, current=0.70, highest=0.70, minutes_left=20)
+def test_hourly_holds_below_tp_threshold(strategy_mode):
+    # entry=0.45 current=0.61 → PnL=35.6% < T2(50%) → HOLD
+    pos = make_hourly_position(strategy_mode, current=0.61, highest=0.61, minutes_left=20)
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
     assert d.signal == ExitSignal.HOLD
@@ -179,4 +190,31 @@ def test_hourly_holds_when_losing(strategy_mode):
     d = evaluator.evaluate(pos)
     assert d.should_exit is False
     assert d.signal == ExitSignal.HOLD
+
+
+# --- SL T3 min-age guard ---
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_late_sl_t3_blocked_for_new_position(strategy_mode):
+    # Late entry: position only 3m old, -35% PnL, 18m left → T3 should NOT fire (age < 10m)
+    pos = make_hourly_position(strategy_mode, current=0.29, highest=0.45, minutes_left=18, entry_age_minutes=3.0)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is False
+    assert d.signal == ExitSignal.HOLD
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_late_sl_t3_fires_when_position_old_enough(strategy_mode):
+    # Position 10m old, -35% PnL, 14m left → T3 fires (age >= 10m)
+    pos = make_hourly_position(strategy_mode, current=0.29, highest=0.45, minutes_left=14, entry_age_minutes=10.0)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_CATASTROPHIC
+
+@pytest.mark.parametrize("strategy_mode", ["updown_hourly", "updown_hourly_dry_run"])
+def test_late_sl_t3_fires_normally_for_early_entry(strategy_mode):
+    # Early entry: position 30m old, -35% PnL, 18m left → T3 fires as before (not affected by fix)
+    pos = make_hourly_position(strategy_mode, current=0.29, highest=0.45, minutes_left=18, entry_age_minutes=30.0)
+    d = evaluator.evaluate(pos)
+    assert d.should_exit is True
+    assert d.signal == ExitSignal.EXIT_CATASTROPHIC
 

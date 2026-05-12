@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 _hourly_slot_history: dict[str, int] = {}
-HOURLY_MAX_ENTRIES_PER_SLOT = 5
+HOURLY_MAX_ENTRIES_PER_SLOT = 8
 
 
 def slot_key(end_date: datetime) -> str:

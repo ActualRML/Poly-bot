@@ -2,6 +2,23 @@
 
 @STRATEGY_MISTAKES.md
 
+## Agent Debate Protocol
+
+For new features or complex logic, run this internal process **before writing any code**. Skip for simple tasks ("fix typo", "change color").
+
+1. **Identity Split** — debate between:
+   - *Architect*: scalability, design patterns, clean code
+   - *Pragmatist*: simplicity, speed, no over-engineering
+   - *Security/QA*: edge cases, vulnerabilities, error handling
+
+2. **Debate Phase** — 1–2 rounds of disagreement/alignment
+
+3. **Consensus** — agreed-upon approach
+
+4. **Execution** — write code based on consensus
+
+---
+
 ## Token Saving (CRITICAL)
 
 - **Zero filler**: Jangan "I understand", "Based on the code", "Let me know if..." — langsung action.

@@ -104,3 +104,41 @@ def test_time_gate_fail():
 def test_time_gate_boundary():
     assert passes_time_gate(15.0, min_minutes=15.0)  # >= boundary OK
 
+
+def test_get_recent_closed_hourly_returns_pnl_key():
+    """Regression: returned dicts must have key 'pnl', not 'pnl_usdc'.
+    The reentry LOSS guard in main.py uses r.get('pnl') — key mismatch = silent bypass."""
+    import sqlite3
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE positions (
+        id INTEGER PRIMARY KEY, question TEXT, outcome TEXT,
+        entry_price REAL, current_price REAL, highest_price REAL,
+        shares REAL, capital_at_risk REAL, resolve_date TEXT,
+        entry_time TEXT, status TEXT, exit_price REAL, exit_time TEXT,
+        pnl_usdc REAL, exit_reason TEXT, gap_pct REAL,
+        kelly_fraction REAL, strategy_mode TEXT, token_id TEXT,
+        condition_id TEXT
+    )""")
+    conn.execute(
+        "INSERT INTO positions (question, status, pnl_usdc, strategy_mode, exit_time) "
+        "VALUES ('BTC Up?', 'closed', -5.0, 'updown_hourly_dry_run', '2026-05-12T10:00:00')"
+    )
+    conn.commit()
+
+    @contextmanager
+    def _mock_conn():
+        yield conn
+
+    with patch("src.models.database.get_conn", _mock_conn):
+        from src.models.database import get_recent_closed_hourly
+        result = get_recent_closed_hourly(limit=10)
+
+    assert len(result) == 1
+    assert "pnl" in result[0], "key must be 'pnl', not 'pnl_usdc'"
+    assert "pnl_usdc" not in result[0]
+    assert result[0]["pnl"] == -5.0
+

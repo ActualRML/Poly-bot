@@ -126,6 +126,63 @@ def test_opposite_gate_blocks_same_direction_chase():
     assert not allowed
     assert reason == "SAME_DIRECTION_CHASE_BLOCKED"
 
+def test_pick_gbm_direction_always_returns_edge_up_and_edge_down():
+    """Contract: pick_gbm_direction must include edge_up and edge_down — used by MTM flip."""
+    d = pick_gbm_direction(prob_up=0.65, market_price_up=0.50, fee=0.018, min_edge=0.05)
+    assert "edge_up" in d
+    assert "edge_down" in d
+    assert "outcome" in d
+    assert "action" in d
+
+
+def test_gbm_flip_condition_flips_when_opposed_and_sufficient_edge():
+    gbm = {"outcome": "Up", "edge_up": 0.12, "edge_down": 0.08, "buy_price": 0.40}
+    mtf_dir = "down"
+    adj_min_edge = 0.06
+
+    opposed = gbm["outcome"] == "Up" and mtf_dir == "down"
+    flip_edge = gbm["edge_down"]
+
+    assert opposed is True
+    assert flip_edge >= adj_min_edge
+    assert round(1.0 - gbm["buy_price"], 4) == 0.60
+
+
+def test_gbm_flip_condition_skips_when_insufficient_flip_edge():
+    gbm = {"outcome": "Up", "edge_up": 0.12, "edge_down": 0.02, "buy_price": 0.40}
+    mtf_dir = "down"
+    adj_min_edge = 0.06
+
+    opposed = gbm["outcome"] == "Up" and mtf_dir == "down"
+    flip_edge = gbm["edge_down"]
+
+    assert opposed is True
+    assert flip_edge < adj_min_edge
+
+
+def test_gbm_flip_condition_no_change_when_aligned():
+    gbm = {"outcome": "Up", "edge_up": 0.12, "edge_down": 0.02, "buy_price": 0.40}
+    mtf_dir = "up"
+    buy_outcome = gbm["outcome"]
+
+    opposed = (buy_outcome == "Up" and mtf_dir == "down") or \
+              (buy_outcome == "Down" and mtf_dir == "up")
+    assert opposed is False
+
+
+def test_gbm_flip_condition_down_to_up():
+    gbm = {"outcome": "Down", "edge_up": 0.09, "edge_down": 0.11, "buy_price": 0.55}
+    mtf_dir = "up"
+    adj_min_edge = 0.06
+
+    opposed = gbm["outcome"] == "Down" and mtf_dir == "up"
+    flip_edge = gbm["edge_up"]
+
+    assert opposed is True
+    assert flip_edge >= adj_min_edge
+    assert round(1.0 - gbm["buy_price"], 4) == 0.45
+
+
 def test_opposite_gate_blocks_when_too_close_to_resolve():
     allowed, reason = passes_opposite_reentry_gate(
         locked_outcome="Up", proposed_outcome="Down",

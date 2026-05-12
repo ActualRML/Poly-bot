@@ -23,7 +23,7 @@ from src.logic.manager import PositionManager
 from src.logic.probability import CryptoProbabilityCalculator
 from src.logic.circuit_breaker import CircuitBreaker
 from src.models.types import SisiOrder
-from src.models.database import log_prediction, get_recent_closed_pnls, count_open_by_resolve_slot
+from src.models.database import log_prediction, get_recent_closed_pnls, count_open_by_resolve_slot, get_recent_closed_hourly
 from src.utils.config import config
 from src.utils.logger import log, tampilkan_header
 from src.utils.telegram_alert import init_telegram, get_alert
@@ -611,7 +611,8 @@ async def _resolve_checker(clob, gamma, manager, breaker, session: aiohttp.Clien
                 f"sudah {hours_past:.1f}h lewat resolve, force close di bid sekarang"
             )
         else:
-            log.warning(
+            _log_fn = log.debug if hours_past < 1.0 else log.warning
+            _log_fn(
                 f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} @ {price:.3f} — "
                 f"harga mid-range, belum settle ({hours_past:.1f}h lewat), skip"
             )
@@ -990,11 +991,27 @@ async def _scan_reentry_opportunities(
         return
 
     log.info(f"[REENTRY SCAN] {len(reentry_candidates)} kandidat dipantau")
+    _recent_closed = get_recent_closed_hourly(limit=20)
 
     for cid in list(reentry_candidates.keys()):
         ctx = reentry_candidates[cid]
         symbol     = ctx["symbol"]
         outcome    = ctx["outcome"]
+
+        if check_symbol_blacklist(symbol):
+            logger.debug(f"[REENTRY] {symbol} blacklisted — skip reentry candidate")
+            continue
+
+        _sym_trades = [
+            r for r in _recent_closed
+            if detect_symbol_from_question(r.get("question", "")) == symbol.upper()
+        ]
+        if _sym_trades and _sym_trades[0].get("pnl", 0) < 0:
+            logger.debug(
+                f"[REENTRY] {symbol} — last hourly trade was LOSS "
+                f"(${_sym_trades[0]['pnl']:.2f}), skip reentry"
+            )
+            continue
         exit_price = ctx["exit_price"]
         token_id   = ctx["token_id"]
         try:
@@ -1245,7 +1262,7 @@ async def _analyze_updown_hourly_market(
 
     sym_mtf = (symbol_momentum_map or {}).get(symbol.upper())
     if sym_mtf is None:
-        logger.debug(f"[UPDOWN HOURLY] {symbol} — no momentum data, skip")
+        logger.warning(f"[UPDOWN HOURLY] {symbol} — no momentum data (Binance fetch failed?), skip")
         return
 
     sym_momentum   = sym_mtf["m_15m"]
@@ -1300,13 +1317,29 @@ async def _analyze_updown_hourly_market(
         if _vol_floor > 0:
             vol_annual = max(vol_annual, _vol_floor)
         _vol_edge_factor = config.UPDOWN_GBM_VOL_EDGE_FACTOR
-        _adj_min_edge = max(config.UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual * _vol_edge_factor)
-        if _adj_min_edge > config.UPDOWN_HOURLY_GBM_MIN_EDGE:
-            logger.debug(
-                f"[UPDOWN HOURLY] {symbol} vol-adj min_edge: "
-                f"{config.UPDOWN_HOURLY_GBM_MIN_EDGE:.0%} → {_adj_min_edge:.1%} "
-                f"(vol={vol_annual:.0%})"
-            )
+        _vol_edge_cap    = config.UPDOWN_GBM_VOL_EDGE_CAP
+        _adj_min_edge = config.UPDOWN_HOURLY_GBM_MIN_EDGE + min(
+            vol_annual * _vol_edge_factor, _vol_edge_cap
+        )
+        logger.debug(
+            f"[UPDOWN HOURLY] {symbol} vol-adj min_edge: "
+            f"{config.UPDOWN_HOURLY_GBM_MIN_EDGE:.0%} + {min(vol_annual * _vol_edge_factor, _vol_edge_cap):.1%} "
+            f"= {_adj_min_edge:.1%} (vol={vol_annual:.0%})"
+        )
+        if config.UPDOWN_GBM_REGIME_SURCHARGE_ENABLED:
+            from src.logic.regime_filter import detect_market_regime as _det_regime
+            _regime = await _det_regime(session)
+            _trend_score  = _regime.get("trend_score", 0)
+            _cross        = _regime.get("cross_asset", {})
+            _cross_n      = _cross.get("aligned_count", 0)
+            _cross_tot    = _cross.get("total_count", 1)
+            _full_consensus = _cross_tot > 0 and _cross_n == _cross_tot
+            if _trend_score >= 4 or (_trend_score >= 3 and _full_consensus):
+                _adj_min_edge += config.UPDOWN_GBM_REGIME_SURCHARGE
+                logger.debug(
+                    f"[UPDOWN HOURLY] {symbol} GBM regime surcharge +{config.UPDOWN_GBM_REGIME_SURCHARGE:.0%} "
+                    f"(score={_trend_score} consensus={_cross_n}/{_cross_tot}) → adj_min_edge={_adj_min_edge:.1%}"
+                )
         try:
             _gbm_decision = await evaluate_hourly_entry(
                 symbol          = symbol,
@@ -1328,22 +1361,55 @@ async def _analyze_updown_hourly_market(
             logger.debug(f"[UPDOWN HOURLY] {symbol} — strike/current price unavailable, skip")
             return
         if _gbm_decision["action"] != "BUY":
-            _raw  = _gbm_decision.get("prob_up_raw", _gbm_decision["prob_up"])
-            _bias = _gbm_decision.get("trend_bias", 0.0)
             _stk  = _gbm_decision.get("strike")
             _cur  = _gbm_decision.get("current")
             _stk_str = f" strike={_stk:.2f} cur={_cur:.2f}" if _stk and _cur else ""
-            logger.debug(
+            log.info(
                 f"[UPDOWN HOURLY] {symbol} GBM skip — "
-                f"P(Up)_raw={_raw:.3f} bias={_bias:+.3f} P(Up)={_gbm_decision['prob_up']:.3f} "
-                f"mkt={market_price_up:.3f} "
-                f"edge_up={_gbm_decision['edge_up']:+.3f} "
-                f"edge_down={_gbm_decision['edge_down']:+.3f}"
-                f"{_stk_str} ({_gbm_decision['reason']})"
+                f"P(Up)={_gbm_decision['prob_up']:.3f} mkt={market_price_up:.3f} "
+                f"edge_up={_gbm_decision['edge_up']:+.3f} edge_down={_gbm_decision['edge_down']:+.3f}"
+                f"{_stk_str} min={_adj_min_edge:.1%} ({_gbm_decision['reason']})"
             )
             return
-        buy_outcome = _gbm_decision["outcome"]
-        buy_price   = _gbm_decision["buy_price"]
+        buy_outcome  = _gbm_decision["outcome"]
+        buy_price    = _gbm_decision["buy_price"]
+
+        if sym_mtf is not None:
+            _mtf_dir = sym_mtf.get("direction")
+            if _mtf_dir is not None:
+                _gbm_opposed = (
+                    (buy_outcome == "Up" and _mtf_dir == "down") or
+                    (buy_outcome == "Down" and _mtf_dir == "up")
+                )
+                if _gbm_opposed:
+                    _flip_edge    = _gbm_decision["edge_down"] if buy_outcome == "Up" else _gbm_decision["edge_up"]
+                    _flip_outcome = "Down" if buy_outcome == "Up" else "Up"
+                    if _flip_edge >= _adj_min_edge:
+                        log.info(
+                            f"[UPDOWN HOURLY] {symbol} GBM→MTM flip {buy_outcome}→{_flip_outcome} "
+                            f"(flip_edge={_flip_edge:+.3f} mom={_mtf_dir})"
+                        )
+                        buy_outcome = _flip_outcome
+                        buy_price   = round(1.0 - buy_price, 4)
+                    else:
+                        log.info(
+                            f"[UPDOWN HOURLY] {symbol} GBM skip — mom={_mtf_dir} opposed, "
+                            f"flip_edge={_flip_edge:+.3f} < min={_adj_min_edge:.1%}"
+                        )
+                        return
+
+        _strike_val  = _gbm_decision.get("strike")
+        _current_val = _gbm_decision.get("current")
+        if _strike_val and _current_val:
+            _drift     = abs(_current_val - _strike_val) / _strike_val
+            _max_drift = config.UPDOWN_GBM_MAX_STRIKE_DRIFT
+            if _max_drift > 0 and _drift > _max_drift:
+                logger.debug(
+                    f"[UPDOWN HOURLY] {symbol} GBM skip — "
+                    f"price drift {_drift:.1%} > max {_max_drift:.1%} "
+                    f"(current={_current_val:.2f} strike={_strike_val:.2f})"
+                )
+                return
     else:
         if sym_momentum > 0:
             buy_outcome = "Down"
@@ -1617,7 +1683,7 @@ async def _analyze_updown_hourly_market(
         _mode_label = (
             f"[GBM] P(Up)={_gbm_decision['prob_up']:.3f} mkt={market_price_up:.3f} "
             f"strike={_gbm_decision['strike']:.2f} cur={_gbm_decision['current']:.2f} "
-            f"edge={_gbm_decision['edge']:+.3f}"
+            f"edge={_gbm_decision['edge']:+.3f} min={_adj_min_edge:.1%}"
         )
     else:
         _mode_label = "[contrarian]"
@@ -1627,7 +1693,7 @@ async def _analyze_updown_hourly_market(
         f"sym 5m/15m/30m {sym_m5:+.2%}/{sym_momentum:+.2%}/{sym_m30:+.2%} "
         f"vol×{sym_vol_ratio:.2f} | "
         f"scalp={btc_scalp.get('action', '-') if btc_scalp else '-'} wr={buy_winrate:.2f} km={_scalp_kelly_mult} | "
-        f"slot {slot_history+1}/{HOURLY_MAX_ENTRIES_PER_SLOT} | Kelly ${float(kelly.bet_usdc):.2f}"
+        f"slot {slot_history+1}/{_max_entries} | Kelly ${float(kelly.bet_usdc):.2f}"
     )
 
     async with _open_position_lock:
@@ -1726,18 +1792,25 @@ async def _analyze_updown_hourly_market(
                 return
 
         alert = get_alert()
-        if alert:
-            await alert.alert_signal(
-                question = question,
-                outcome  = buy_outcome,
-                price    = buy_price,
-                bet_usdc = float(kelly.bet_usdc),
-                gap_pct  = _record_gap * 100,
-                ev       = float(kelly.expected_value),
-                session  = session,
-                dry_run  = config.DRY_RUN,
-                strategy = "Up/Down Hourly",
-            )
+        if not alert:
+            logger.warning("[UPDOWN HOURLY] alert=None — Telegram tidak terkonfigurasi")
+        else:
+            try:
+                ok = await alert.alert_signal(
+                    question = question,
+                    outcome  = buy_outcome,
+                    price    = buy_price,
+                    bet_usdc = float(kelly.bet_usdc),
+                    gap_pct  = _record_gap * 100,
+                    ev       = float(kelly.expected_value),
+                    session  = session,
+                    dry_run  = config.DRY_RUN,
+                    strategy = "Up/Down Hourly",
+                )
+                if ok is False:
+                    logger.warning("[UPDOWN HOURLY] Entry alert gagal dikirim ke Telegram")
+            except Exception as _ae:
+                logger.warning(f"[UPDOWN HOURLY] Entry alert exception: {_ae}")
 
 _TARIK_FLAG = Path(__file__).resolve().parent.parent / "data" / "tarik.flag"
 
@@ -1869,6 +1942,8 @@ async def run_mispricing_mode(clob: ClobClient):
         _cb_alerted = False
         _profit_locked_markets: dict[str, str] = {}
         _candle_sl_markets: dict[str, str] = {}
+        _hourly_flip_queue: dict[str, dict] = {}
+        _hourly_flip_last_exec: dict[str, datetime] = {}
         while True:
             try:
                 await _backfill_missing_token_ids(gamma, session)
@@ -1975,6 +2050,40 @@ async def run_mispricing_mode(clob: ClobClient):
                                 f"{_d.position.outcome} SL'd — queued for reverse re-entry"
                             )
 
+                        if (_d.signal == _XS.EXIT_CATASTROPHIC
+                                and _d.position.strategy_mode in (
+                                    "updown_hourly", "updown_hourly_dry_run"
+                                )
+                                and float(_d.estimated_pnl_usdc or 0) < 0):
+                            _fq_pnl = (
+                                (float(_d.position.current_price) - float(_d.position.entry_price))
+                                / float(_d.position.entry_price) * 100
+                            )
+                            _fq_mins = (
+                                (_d.position.resolve_date - datetime.now(timezone.utc))
+                                .total_seconds() / 60
+                            )
+                            _fq_opp  = round(1.0 - float(_d.position.current_price), 4)
+                            if (
+                                _fq_pnl  <= config.HOURLY_FLIP_TRIGGER_PCT
+                                and _fq_mins >= config.HOURLY_FLIP_MIN_MINUTES
+                                and _fq_opp  <= config.HOURLY_FLIP_MAX_ENTRY
+                            ):
+                                _fq_dir = "Down" if _d.position.outcome == "Up" else "Up"
+                                _hourly_flip_queue[_d.position.condition_id] = {
+                                    "flip_to":          _fq_dir,
+                                    "flip_price":       _fq_opp,
+                                    "original_capital": float(_d.position.capital_at_risk),
+                                    "resolve_date":     _d.position.resolve_date,
+                                    "question":         _d.position.question,
+                                    "symbol":           detect_symbol_from_question(_d.position.question),
+                                }
+                                log.info(
+                                    f"[FLIP] {_d.position.condition_id[:8]} queued: "
+                                    f"{_d.position.outcome}→{_fq_dir} @ {_fq_opp:.3f} "
+                                    f"(pnl {_fq_pnl:.0f}%, {_fq_mins:.0f}m left)"
+                                )
+
                         if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
                             "updown_hourly", "updown_hourly_dry_run"
                         ):
@@ -2028,14 +2137,18 @@ async def run_mispricing_mode(clob: ClobClient):
                     log.info(breaker.get_summary(unrealized_pnl=manager.get_unrealized_pnl()))
                 await _prefetch_prices(session)
 
-                markets = await gamma.ascan_hourly_opportunities(
-                    session,
-                    min_volume             = getattr(config, "HOURLY_MIN_MARKET_VOLUME", 500),
-                    min_liquidity          = getattr(config, "HOURLY_MIN_LIQUIDITY", 200),
-                    max_minutes_to_resolve = getattr(config, "HOURLY_MAX_MINUTES_TO_RESOLVE", 90),
-                    min_minutes_to_resolve = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5),
-                    limit                  = 500,
-                )
+                try:
+                    markets = await gamma.ascan_hourly_opportunities(
+                        session,
+                        min_volume             = getattr(config, "HOURLY_MIN_MARKET_VOLUME", 500),
+                        min_liquidity          = getattr(config, "HOURLY_MIN_LIQUIDITY", 200),
+                        max_minutes_to_resolve = getattr(config, "HOURLY_MAX_MINUTES_TO_RESOLVE", 90),
+                        min_minutes_to_resolve = getattr(config, "HOURLY_MIN_MINUTES_TO_RESOLVE", 5),
+                        limit                  = 500,
+                    )
+                except Exception as _e:
+                    logger.warning(f"[HOURLY SCAN] Gamma API gagal ({_e}), skip cycle")
+                    markets = []
 
                 if config.CB_ENABLED:
                     daily_drawdown = breaker.state.daily_loss / breaker.starting_capital
@@ -2119,6 +2232,158 @@ async def run_mispricing_mode(clob: ClobClient):
                     log.info(
                         f"[UPDOWN] hourly={len(hourly_markets)} active"
                     )
+
+                    # --- Hourly flip queue processor ---
+                    for _fcid in list(_hourly_flip_queue.keys()):
+                        _fq = _hourly_flip_queue[_fcid]
+                        _f_mins = (
+                            (_fq["resolve_date"] - datetime.now(timezone.utc))
+                            .total_seconds() / 60
+                        )
+                        if _f_mins < config.HOURLY_FLIP_MIN_MINUTES:
+                            log.info(f"[FLIP] {_fcid[:8]} expired ({_f_mins:.0f}m left)")
+                            _hourly_flip_queue.pop(_fcid)
+                            continue
+
+                        _f_market = next(
+                            (m for m in hourly_markets
+                             if m.get("conditionId", m.get("id", "")) == _fcid),
+                            None,
+                        )
+                        if _f_market is None:
+                            _hourly_flip_queue.pop(_fcid)
+                            continue
+
+                        # Cooldown guard
+                        _f_last_exec = _hourly_flip_last_exec.get(_fcid)
+                        if (_f_last_exec and
+                                (datetime.now(timezone.utc) - _f_last_exec).total_seconds() / 60
+                                < config.HOURLY_FLIP_COOLDOWN_MINUTES):
+                            continue
+
+                        # Momentum filter (m_5m): flip→Down needs bearish, flip→Up needs bullish
+                        _f_sym_key  = (_fq.get("symbol") or "").upper()
+                        _f_mom_data = (symbol_momentum_map or {}).get(_f_sym_key, {})
+                        _f_m5       = _f_mom_data.get("m_5m", None)
+                        if _f_m5 is None:
+                            log.info(f"[FLIP] {_fcid[:8]} wait: no m_5m for {_f_sym_key}")
+                            continue
+                        _f_want_bearish = _fq["flip_to"] == "Down"
+                        if _f_want_bearish and _f_m5 >= 0:
+                            log.info(
+                                f"[FLIP] {_fcid[:8]} skip: →Down but m_5m={_f_m5:+.4f} (bullish)"
+                            )
+                            continue
+                        if not _f_want_bearish and _f_m5 <= 0:
+                            log.info(
+                                f"[FLIP] {_fcid[:8]} skip: →Up but m_5m={_f_m5:+.4f} (bearish)"
+                            )
+                            continue
+
+                        # Live price check + price buffer guard
+                        _f_tokens  = _f_market.get("tokens", [])
+                        _f_tok_obj = next(
+                            (t for t in _f_tokens if t.get("outcome") == _fq["flip_to"]), None
+                        )
+                        if not _f_tok_obj:
+                            _hourly_flip_queue.pop(_fcid)
+                            continue
+                        _f_token_id = (
+                            _f_tok_obj.get("token_id")
+                            or _f_tok_obj.get("tokenId")
+                            or _f_tok_obj.get("id", "")
+                        )
+                        _f_live_price = float(
+                            _f_tok_obj.get("price", _fq["flip_price"])
+                        )
+                        if _f_live_price > config.HOURLY_FLIP_MAX_ENTRY:
+                            log.info(
+                                f"[FLIP] {_fcid[:8]} pop: {_fq['flip_to']} @ {_f_live_price:.3f}"
+                                f" > max {config.HOURLY_FLIP_MAX_ENTRY}"
+                            )
+                            _hourly_flip_queue.pop(_fcid)
+                            continue
+                        if _f_live_price > _fq["flip_price"] * (1 + config.HOURLY_FLIP_PRICE_BUFFER_PCT):
+                            log.info(
+                                f"[FLIP] {_fcid[:8]} pop: slippage {_f_live_price:.3f}"
+                                f" vs queued {_fq['flip_price']:.3f}"
+                            )
+                            _hourly_flip_queue.pop(_fcid)
+                            continue
+
+                        # Spread guard (optional — only if clob exposes get_spread)
+                        try:
+                            if hasattr(clob, "get_spread"):
+                                _f_spread = clob.get_spread(_f_token_id)
+                                if _f_spread is not None and _f_spread > config.HOURLY_FLIP_MAX_SPREAD:
+                                    log.info(
+                                        f"[FLIP] {_fcid[:8]} skip: spread {_f_spread:.3f}"
+                                        f" > {config.HOURLY_FLIP_MAX_SPREAD}"
+                                    )
+                                    continue
+                        except Exception:
+                            pass
+
+                        # Entry
+                        _f_capital = _fq["original_capital"] * 0.5
+                        _f_shares  = Decimal(str(round(_f_capital / _f_live_price, 4)))
+                        _f_cap_dec = Decimal(str(round(_f_capital, 4)))
+                        _f_mode    = "updown_hourly_dry_run" if config.DRY_RUN else "updown_hourly"
+                        _f_sym     = _fq.get("symbol") or "?"
+
+                        async with _open_position_lock:
+                            if not manager.can_open(capital=_f_capital):
+                                continue
+
+                            if config.DRY_RUN:
+                                manager.open_position(
+                                    condition_id    = _fcid,
+                                    question        = _fq["question"],
+                                    outcome         = _fq["flip_to"],
+                                    entry_price     = Decimal(str(_f_live_price)),
+                                    shares          = _f_shares,
+                                    capital_at_risk = _f_cap_dec,
+                                    resolve_date    = _fq["resolve_date"],
+                                    gap_pct         = 0.0,
+                                    kelly_fraction  = 0.5,
+                                    strategy_mode   = _f_mode,
+                                    token_id        = _f_token_id,
+                                )
+                                record_slot_entry(_fq["resolve_date"])
+                                log.info(
+                                    f"[FLIP DRY] {_f_sym} {_fq['flip_to']} @ {_f_live_price:.3f}"
+                                    f" cap ${_f_capital:.2f} ({_f_mins:.0f}m left)"
+                                )
+                            else:
+                                from src.logic.pricing import ke_decimal as _fked
+                                _f_order = clob.pasang_order(
+                                    sisi     = SisiOrder.BELI,
+                                    harga    = _fked(str(_f_live_price)),
+                                    ukuran   = _f_shares,
+                                    token_id = _f_token_id,
+                                )
+                                if _f_order:
+                                    manager.open_position(
+                                        condition_id    = _fcid,
+                                        question        = _fq["question"],
+                                        outcome         = _fq["flip_to"],
+                                        entry_price     = Decimal(str(_f_live_price)),
+                                        shares          = _f_shares,
+                                        capital_at_risk = _f_cap_dec,
+                                        resolve_date    = _fq["resolve_date"],
+                                        gap_pct         = 0.0,
+                                        kelly_fraction  = 0.5,
+                                        strategy_mode   = _f_mode,
+                                        token_id        = _f_token_id,
+                                    )
+                                    record_slot_entry(_fq["resolve_date"])
+                                    log.info(
+                                        f"[FLIP] ✅ {_f_sym} {_fq['flip_to']} @ {_f_live_price:.3f}"
+                                        f" cap ${_f_capital:.2f} ({_f_mins:.0f}m left)"
+                                    )
+
+                            _hourly_flip_last_exec[_fcid] = datetime.now(timezone.utc)
+                            _hourly_flip_queue.pop(_fcid, None)
 
                     _market_session_label = (
                         _market_regime["session"]["session"] if _market_regime else "US_MAIN"

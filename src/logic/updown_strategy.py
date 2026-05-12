@@ -12,6 +12,8 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+_STRIKE_TS_THRESHOLD_S: float = 120.0  # reject kline if open_time drifts > 2m from start_date
+
 SYMBOL_KEYWORDS = {
     "BTC":  ["bitcoin", "btc"],
     "ETH":  ["ethereum", "eth"],
@@ -138,9 +140,12 @@ async def fetch_reference_price_hourly(
 ) -> Optional[float]:
     from src.api.binance_client import fetch_klines
 
-    symbol   = symbol.upper()
-    start_ms = int(start_date.timestamp() * 1000)
-    end_ms   = start_ms + 3_600_000
+    symbol     = symbol.upper()
+    # Round down to clean hour — Polymarket start_date has minute offset (e.g. 01:07 UTC)
+    # so Binance with start_ms=01:07 would skip the 01:00 candle and return 02:00 instead.
+    start_hour = start_date.replace(minute=0, second=0, microsecond=0)
+    start_ms   = int(start_hour.timestamp() * 1000)
+    end_ms     = start_ms + 3_600_000
 
     klines = await fetch_klines(symbol, session, interval="1h", limit=1,
                                  start_ms=start_ms, end_ms=end_ms)
@@ -152,7 +157,18 @@ async def fetch_reference_price_hourly(
     if ref_price <= 0:
         return None
 
-    logger.debug(f"[UPDOWN HOURLY] {symbol} reference (1h open @ {start_date.strftime('%H:%M UTC')}) = ${ref_price:,.4f}")
+    kline_open_time: datetime = klines[0][0]
+    drift_s = abs((kline_open_time - start_hour).total_seconds())
+    if drift_s > _STRIKE_TS_THRESHOLD_S:
+        logger.warning(
+            f"[UPDOWN HOURLY] {symbol} strike timestamp mismatch: "
+            f"got {kline_open_time.strftime('%H:%M UTC')} "
+            f"expected {start_hour.strftime('%H:%M UTC')} "
+            f"(drift={drift_s:.0f}s) — skip"
+        )
+        return None
+
+    logger.debug(f"[UPDOWN HOURLY] {symbol} reference (1h open @ {start_hour.strftime('%H:%M UTC')}) = ${ref_price:,.4f}")
     return ref_price
 
 async def calculate_updown_probability_hourly(

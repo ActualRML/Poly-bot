@@ -187,7 +187,12 @@ async def fetch_klines(
 
     _check_rate_auto_reset()
     if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
-        logger.debug(f"[BINANCE] Klines {symbol} skip — ban/pause aktif")
+        if start_ms is None and end_ms is None:
+            _ck = f"{symbol.upper()}_{interval}_{limit}_klines"
+            _stale = _klines_cache.get(_ck)
+            if _stale:
+                logger.debug(f"[BINANCE] Klines {symbol} pakai stale cache (ban/pause aktif)")
+                return _stale[0]
         return []
 
     try:
@@ -251,7 +256,12 @@ async def fetch_klines_extended(
             return _cached[0]
 
     if now < _ban_until or _rate_limit_status == "FULL_PAUSE":
-        logger.debug(f"[BINANCE] Klines ext {symbol} skip — ban/pause aktif")
+        if start_ms is None and end_ms is None:
+            _ck = f"{symbol.upper()}_{interval}_{limit}_ext"
+            _stale = _klines_cache.get(_ck)
+            if _stale:
+                logger.debug(f"[BINANCE] Klines ext {symbol} pakai stale cache (ban/pause aktif)")
+                return _stale[0]
         return []
 
     try:

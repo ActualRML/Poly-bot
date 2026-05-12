@@ -42,6 +42,14 @@ class GammaClient:
                     continue
                 logger.error(f"Gamma API timeout {endpoint} setelah {_retries+1} attempts")
                 raise
+            except aiohttp.ClientResponseError as e:
+                if e.status in (403, 429, 500, 502, 503) and attempt < _retries:
+                    wait = 2 ** attempt
+                    logger.warning(f"Gamma HTTP {e.status} {endpoint} (attempt {attempt+1}), retry in {wait}s")
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error(f"Gamma API HTTP {e.status} endpoint={endpoint}: {e}")
+                raise
             except Exception as e:
                 logger.error(f"Gamma API async error endpoint={endpoint}: {e}")
                 raise
