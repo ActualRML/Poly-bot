@@ -54,7 +54,9 @@ class Config:
     HOURLY_PROFIT_LOCK_PCT       : float = _get_float("HOURLY_PROFIT_LOCK_PCT", 30.0)
     HOURLY_PROFIT_LOCK_HIGH_PCT  : float = _get_float("HOURLY_PROFIT_LOCK_HIGH_PCT", 50.0)
 
-    HOURLY_SL_MIN_AGE_MINUTES: float = _get_float("HOURLY_SL_MIN_AGE_MINUTES", 10.0)
+    HOURLY_SL_MIN_AGE_MINUTES          : float = _get_float("HOURLY_SL_MIN_AGE_MINUTES", 10.0)
+    HOURLY_LATE_SL_T4_PCT              : float = _get_float("HOURLY_LATE_SL_T4_PCT", -45.0)
+    HOURLY_LATE_SL_T4_MAX_REMAINING    : float = _get_float("HOURLY_LATE_SL_T4_MAX_REMAINING", 40.0)
 
     HOURLY_FLIP_TRIGGER_PCT      : float = _get_float("HOURLY_FLIP_TRIGGER_PCT", -20.0)
     HOURLY_FLIP_MAX_ENTRY        : float = _get_float("HOURLY_FLIP_MAX_ENTRY", 0.72)

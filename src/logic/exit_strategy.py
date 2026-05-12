@@ -120,12 +120,15 @@ class ExitEvaluator:
         # T1 (last 5m, INNER):    PnL ≤ -70%  → only extreme triggers exit
         # T2 (5-10m, MIDDLE):     PnL ≤ -50%  → moderate loss triggers exit
         # T3 (10-20m, OUTER):     PnL ≤ -30%  → small loss triggers exit (cut early, redeploy)
+        # T4 (20-40m, EARLY):     PnL ≤ -45%  → momentum continuation cut, redeploy before meltdown
         hourly_late_sl_t1_pct: float = -70.0,
         hourly_late_sl_t1_max_remaining: float = 5.0,
         hourly_late_sl_t2_pct: float = -50.0,
         hourly_late_sl_t2_max_remaining: float = 10.0,
         hourly_late_sl_t3_pct: float = -30.0,
         hourly_late_sl_t3_max_remaining: float = 20.0,
+        hourly_late_sl_t4_pct: float = -45.0,
+        hourly_late_sl_t4_max_remaining: float = 40.0,
         # Profit lock for hourly — fire pada profit besar, otherwise hold to resolve.
         # T1 (≥200%): near-max ITM, kunci kapan saja >5m left
         # T2 (≥150%): substantial profit, kunci kalau masih banyak waktu (>15m)
@@ -154,6 +157,8 @@ class ExitEvaluator:
         self.hourly_late_sl_t2_max_remaining = hourly_late_sl_t2_max_remaining
         self.hourly_late_sl_t3_pct = hourly_late_sl_t3_pct
         self.hourly_late_sl_t3_max_remaining = hourly_late_sl_t3_max_remaining
+        self.hourly_late_sl_t4_pct = hourly_late_sl_t4_pct
+        self.hourly_late_sl_t4_max_remaining = hourly_late_sl_t4_max_remaining
         self.hourly_lock_t1_pct = hourly_lock_t1_pct
         self.hourly_lock_t1_min_remaining = hourly_lock_t1_min_remaining
         self.hourly_lock_t2_pct = hourly_lock_t2_pct
@@ -240,14 +245,26 @@ class ExitEvaluator:
             # Tiered late-stage SL with EXCLUSIVE bands (no overlap).
             # Threshold tumbuh seiring mendekati resolve karena slippage + result decided.
             #
+            # T4 (20-40m, EARLY):  PnL ≤ -45%  → momentum continuation cut
             # T3 (10-20m, OUTER):  PnL ≤ -30%  → cut early, redeploy capital
             # T2 (5-10m,  MIDDLE): PnL ≤ -50%
             # T1 (0-5m,   INNER):  PnL ≤ -70%  → only extreme, slippage too costly otherwise
             #
-            # T3 punya min age guard: late entry (masuk <10m sebelum T3 window) tidak
-            # langsung kena SL — posisi butuh ruang napas sebelum dievaluasi.
+            # T4 dan T3 punya min age guard: late entry butuh ruang napas sebelum SL aktif.
             _age_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
             _sl_min_age = getattr(config, "HOURLY_SL_MIN_AGE_MINUTES", 10.0)
+            _t4_pct = max(self.hourly_late_sl_t4_pct * _scale, -70.0)
+            if (self.hourly_late_sl_t3_max_remaining < mins <= self.hourly_late_sl_t4_max_remaining
+                    and pnl_pct <= _t4_pct
+                    and _age_min >= _sl_min_age):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL EARLY: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
             if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
                     and pnl_pct <= _t3_pct
                     and _age_min >= _sl_min_age):

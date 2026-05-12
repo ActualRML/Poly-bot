@@ -1911,8 +1911,10 @@ async def run_mispricing_mode(clob: ClobClient):
             hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 60.0),
             hourly_trailing_activate_pct = getattr(config, "HOURLY_TRAILING_ACTIVATE_PCT", 15.0),
             hourly_trailing_retrace_pct  = getattr(config, "HOURLY_TRAILING_RETRACE_PCT", 0.30),
-            hourly_lock_t1_pct           = getattr(config, "HOURLY_LOCK_T1_PCT", 150.0),
-            hourly_lock_t2_pct           = getattr(config, "HOURLY_LOCK_T2_PCT", 100.0),
+            hourly_late_sl_t4_pct           = getattr(config, "HOURLY_LATE_SL_T4_PCT", -45.0),
+            hourly_late_sl_t4_max_remaining = getattr(config, "HOURLY_LATE_SL_T4_MAX_REMAINING", 40.0),
+            hourly_lock_t1_pct           = getattr(config, "HOURLY_LOCK_T1_PCT", 80.0),
+            hourly_lock_t2_pct           = getattr(config, "HOURLY_LOCK_T2_PCT", 50.0),
         ),
     )
     builder = BaseRateBuilder()
