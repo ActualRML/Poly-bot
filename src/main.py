@@ -2400,6 +2400,47 @@ async def run_mispricing_mode(clob: ClobClient):
                                     _hourly_flip_queue.pop(_fcid)
                                     continue
 
+                                # Guard 1 — Cooldown per-symbol
+                                _f_sym_str = _fq.get("symbol", "")
+                                _f_last_exec = _hourly_flip_last_exec.get(_f_sym_str)
+                                if _f_last_exec and (
+                                    datetime.now(timezone.utc) - _f_last_exec
+                                ).total_seconds() / 60 < config.HOURLY_FLIP_COOLDOWN_MINUTES:
+                                    log.info(f"[FLIP] {_fcid[:8]} skip: cooldown")
+                                    continue
+
+                                # Guard 2 — Price buffer (max slippage from queued price)
+                                _f_queued_price = _fq["flip_price"]
+                                if _f_price > _f_queued_price * (1 + config.HOURLY_FLIP_PRICE_BUFFER_PCT):
+                                    log.info(
+                                        f"[FLIP] {_fcid[:8]} pop: slippage "
+                                        f"{_f_price:.3f} > {_f_queued_price:.3f}×(1+{config.HOURLY_FLIP_PRICE_BUFFER_PCT:.0%})"
+                                    )
+                                    _hourly_flip_queue.pop(_fcid)
+                                    continue
+
+                                # Guard 3 — Spread guard (1 - sum(outcomePrices) proxy)
+                                _f_spread = 1.0 - sum(
+                                    float(p) for p in (_f_op if isinstance(_f_op, list) else [])
+                                )
+                                if _f_spread > config.HOURLY_FLIP_MAX_SPREAD:
+                                    log.info(f"[FLIP] {_fcid[:8]} skip: spread {_f_spread:.3f}")
+                                    continue
+
+                                # Guard 4 — Momentum filter (don't flip against strong m_5m)
+                                _f_mom_data = symbol_momentum_map.get(_f_sym_str.upper(), {})
+                                _f_m5 = float(_f_mom_data.get("m_5m") or 0.0)
+                                if _fq["flip_to"] == "Down" and _f_m5 > 0:
+                                    log.info(
+                                        f"[FLIP] {_fcid[:8]} skip: bullish m5={_f_m5:.4f} vs flip Down"
+                                    )
+                                    continue
+                                if _fq["flip_to"] == "Up" and _f_m5 < 0:
+                                    log.info(
+                                        f"[FLIP] {_fcid[:8]} skip: bearish m5={_f_m5:.4f} vs flip Up"
+                                    )
+                                    continue
+
                                 # Token ID
                                 _f_token_ids = gamma.extract_token_ids(_f_market)
                                 _f_token_id  = _f_token_ids.get(_fq["flip_to"], "")
@@ -2441,6 +2482,7 @@ async def run_mispricing_mode(clob: ClobClient):
                                             token_id        = _f_token_id,
                                         )
                                         record_slot_entry(_fq["resolve_date"])
+                                        _hourly_flip_last_exec[_f_sym_str] = datetime.now(timezone.utc)
                                         log.info(
                                             f"[FLIP DRY] {_f_sym} {_fq['flip_to']}"
                                             f" @ {_f_price:.3f} cap ${_f_capital:.2f}"
@@ -2475,6 +2517,7 @@ async def run_mispricing_mode(clob: ClobClient):
                                                 token_id        = _f_token_id,
                                             )
                                             record_slot_entry(_fq["resolve_date"])
+                                            _hourly_flip_last_exec[_f_sym_str] = datetime.now(timezone.utc)
                                             log.info(
                                                 f"[FLIP] ✅ {_f_sym} {_fq['flip_to']}"
                                                 f" @ {_f_price:.3f} cap ${_f_capital:.2f}"
@@ -2485,7 +2528,8 @@ async def run_mispricing_mode(clob: ClobClient):
                                                 f"[FLIP] Order failed {_fcid[:8]}"
                                             )
 
-                                _hourly_flip_queue.pop(_fcid, None)
+                                if config.DRY_RUN or _f_order:
+                                    _hourly_flip_queue.pop(_fcid, None)
 
                             except Exception as _fpe:
                                 logger.warning(f"[FLIP PROC] {_fcid[:8]}: {_fpe}")
