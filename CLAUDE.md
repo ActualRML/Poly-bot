@@ -33,12 +33,34 @@ For new features or complex logic, run this internal process **before writing an
 ## Struktur
 
 ```
-src/main.py               → entry point + main loop (semua strategy)
-src/logic/                → strategy, probability, kelly, risk_manager, circuit_breaker,
-                            exit_strategy, mispricing, manager, updown_strategy,
-                            gbm_hourly, regime_filter, reentry, oracle_arb
+src/main.py               → entry point + main loop
+src/scout/                → market discovery + signal generation
+  scanner.py              → scan updown hourly markets
+  regime.py               → cross-asset regime filter
+  gbm.py                  → GBM probability model (directional fair-value)
+  mispricing.py           → mispricing detector
+  oracle_arb.py           → GBM math (gbm_prob_above)
+  technical.py            → RSI, z-score, EMA, trend
+src/risk/                 → sizing, circuit breaker, filters
+  manager.py              → dynamic stop loss + position sizing
+  kelly.py                → Kelly criterion sizer
+  circuit.py              → circuit breaker (daily loss / consecutive loss / drawdown)
+  blacklist.py            → per-symbol 4h pause after 3 consecutive losses
+  slots.py                → slot cap + cumulative entry tracking
+  pricing.py              → ke_decimal, hitung_midpoint, validasi_harga
+  probability.py          → CryptoProbabilityCalculator (daily strategy)
+  stagnation.py           → price stagnation tracker
+src/execute/              → entry, exit, reentry, position mgmt
+  exit.py                 → ExitEvaluator, PortfolioExitManager (TP + SL bands)
+  reentry.py              → same-direction reentry logic
+  reentry_mgr.py          → reentry candidate scanner + lifecycle
+  scalping.py             → scalping exit signals
+  position.py             → PositionManager (open/close/resolve)
+  strategy.py             → dynamic threshold + force exit helpers
+  candle.py               → candle strategy scanner + analyzer
+  updown.py               → up/down daily strategy helpers
 src/api/                  → CLOB, Gamma, Binance clients
-src/utils/                → config, logger, telegram_alert
+src/utils/                → config, logger, parsing, telegram_alert
 src/models/               → database (SQLite), types
 script/recalibrate.py     → auto-recalibration BTC/ETH/SOL/BNB
 script/monitor.py         → monitor posisi (stdout)
@@ -68,92 +90,83 @@ Ref price: Binance 1m close 16:00 UTC kemarin. Min edge: `UPDOWN_THRESHOLD=0.05`
 Market "BTC Up or Down - 1AM ET?" resolve tiap jam. Asset: BTC, ETH, SOL, XRP, DOGE, BNB.
 Skip: 5m dan 15m markets.
 
-**Direction logic — `src/logic/gbm_hourly.py`**:
+**Direction logic — `src/scout/gbm.py`**:
 - Strike = Binance 1h candle open di start_date (cached per market)
 - `P(Up) = gbm_prob_above(current, strike, vol_annual, T_remaining)` (closed-form GBM)
 - `edge_up   = P(Up)     - market_price_up   - fee`
 - `edge_down = (1-P(Up)) - market_price_down - fee`
 - Pick side dengan edge ≥ `adj_min_edge`, else SKIP
-  `adj_min_edge = max(UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual × UPDOWN_GBM_VOL_EDGE_FACTOR)`
+  `adj_min_edge = max(UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual x UPDOWN_GBM_VOL_EDGE_FACTOR)`
   e.g. DOGE (100%) → 10%, BNB (56%) → 5.6%, BTC (44%) → 4.4%
 - Toggle `UPDOWN_HOURLY_USE_GBM=false` → fallback ke contrarian lama
 
 **Filter stack** (tiap entry harus lolos semua):
 1. Slot cap: `MAX_POSITIONS_PER_SLOT=2` open + `_HOURLY_MAX_ENTRIES_PER_SLOT=3` cumulative
-2. Per-symbol blacklist: 3 loss berturut-turut → pause symbol 4 jam (active, wired di evaluate_exits + resolve_checker)
+2. Per-symbol blacklist: 3 loss berturut-turut → pause symbol 4 jam (wired di evaluate_exits + resolve_checker)
 3. Candle open delay: skip 5m awal candle (`UPDOWN_HOURLY_CANDLE_OPEN_MIN`)
-4. Volume ratio ≥ `UPDOWN_HOURLY_MIN_VOL_RATIO` (default 0.5, vs baseline 30m)
+4. Volume ratio >= `UPDOWN_HOURLY_MIN_VOL_RATIO` (default 0.5, vs baseline 30m)
 5. Outcome price stagnation: skip kalau Polymarket price <0.5% range dalam 5m
-6. Min/max entry: `0.20 ≤ buy_price ≤ 0.45`
+6. Min/max entry: `0.20 <= buy_price <= 0.45`
 7. Scalping signal gate (BTC): skip `WAIT_NOISE` / `WAIT_TREND` / km=0
-8. Market regime filter (`regime_filter.py`):
-   - Cross-asset: ≥70% asset searah → +2
+8. Market regime filter (`src/scout/regime.py`):
+   - Cross-asset: >=70% asset searah → +2
    - HTF 1h+4h alignment → +1
    - Session bias (US_OPEN) → +1
-   - Score ≥ 4 → SKIP (only when `USE_GBM=false`; GBM mode bypass — rides trend)
+   - Score >= 4 → SKIP (only when `USE_GBM=false`; GBM mode bypass)
 9. Liquidity check pre-entry (CLOB orderbook)
-10. **GBM mode bypasses momentum-window gating** (filter redundant — edge gate sudah handle)
+10. **GBM mode bypasses momentum-window gating** (edge gate sudah handle)
 
 **`gap_pct` recorded di DB**: GBM mode → realized edge (e.g. 0.08 = 8%); contrarian mode → BTC 15m momentum (legacy).
 
 **Sizing**:
-- `buy_winrate = clamp(GBM prob_up, 0.50, 0.80)` — sisi yang dibeli (Up→prob_up, Down→1−prob_up); fallback 0.55 kalau GBM disabled
-- Kelly bet × `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; ×1.2 mom aligned, ×0.75 mom opposed)
+- `buy_winrate = clamp(GBM prob_up, 0.50, 0.80)` — sisi yang dibeli; fallback 0.55 kalau GBM disabled
+- Kelly bet x `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; x1.2 mom aligned, x0.75 mom opposed)
 - Asia session: cap kelly_multiplier ke 0.7
 
 ---
 
-## Exit Strategy untuk Hourly (`src/logic/exit_strategy.py`)
+## Exit Strategy untuk Hourly (`src/execute/exit.py`)
 
 **Asimetris: profit lock cepat, SL hanya di akhir.**
 
-### Profit Lock (lock cepat, ride sisanya)
+### Profit Lock
 | Tier | PnL trigger | Time gate |
 |---|---|---|
-| T1 | ≥ 200% | > 5m left (near-max ITM) |
-| T2 | ≥ 150% | > 15m left (substantial profit) |
+| T1 | >= 200% | > 5m left |
+| T2 | >= 150% | > 15m left |
 
 Selain itu → HOLD ke resolve untuk full payout.
 
-**Exit alerts**: setiap exit (TP maupun SL) kirim `alert_exit` ke Telegram + `log.info [EXIT]` ke terminal.
-Format log: `[EXIT] ✅/❌ {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
+**Exit alerts**: setiap exit kirim `alert_exit` ke Telegram + `log.info [EXIT]`.
+Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 
-### Late-Stage SL (exclusive bands, threshold makin lenient dekat resolve)
+### Late-Stage SL
 | Band | Time range | Threshold |
 |---|---|---|
-| OUTER | 10–20m left | PnL ≤ −30% |
-| MIDDLE | 5–10m left | PnL ≤ −50% |
-| INNER | 0–5m left | PnL ≤ −70% |
+| OUTER | 10–20m left | PnL <= -30% |
+| MIDDLE | 5–10m left | PnL <= -50% |
+| INNER | 0–5m left | PnL <= -70% |
 
-> 20m left → NO SL (kasih ruang recovery, filosofi hold to resolve).
+> 20m left → NO SL (kasih ruang recovery).
 
 ---
 
 ## Re-entry After Take-Profit
 
-### Same-direction re-entry (`src/logic/reentry.py`)
-
-Setelah TP fire, candidate registered. Setiap cycle scan:
-
-1. Drop ≥ 30% dari exit_price
-2. Fair value (`estimate_fair_value`) > current_price + fee + 5% edge
-3. Orderbook: spread ≤ 5%, liquidity cukup
-4. Time gate: ≥ 15m to resolve
+### Same-direction (`src/execute/reentry.py`)
+1. Drop >= 30% dari exit_price
+2. Fair value > current_price + fee + 5% edge
+3. Orderbook: spread <= 5%, liquidity cukup
+4. Time gate: >= 15m to resolve
 5. Slot cumulative cap belum penuh
+→ Re-entry @ **half size**.
 
-→ Re-entry @ **half size** dari original capital.
-
-### Opposite-direction re-entry (`gbm_hourly.passes_opposite_reentry_gate`)
-
-Capture fakeout reversal — saat TP fire lalu harga reverse balik:
-
-1. `UPDOWN_HOURLY_OPPOSITE_REENTRY=true` aktif
-2. Time floor: ≥ `UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES` (default 10m) to resolve
-3. GBM decision.outcome ≠ locked_outcome (anti same-direction chase)
-4. Standard GBM edge gate (≥ 5% post-fee) tetap apply
-5. Slot cumulative cap (max 3 per slot) tetap apply
-
-`_profit_locked_markets` sekarang `dict[condition_id → locked_outcome]` untuk track sisi yang udah TP.
+### Opposite-direction (`src/scout/gbm.py:passes_opposite_reentry_gate`)
+1. `UPDOWN_HOURLY_OPPOSITE_REENTRY=true`
+2. Time floor: >= `UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES` (default 10m)
+3. GBM decision.outcome != locked_outcome
+4. Standard GBM edge gate tetap apply
+5. Slot cumulative cap tetap apply
 
 ---
 
@@ -168,8 +181,7 @@ Capture fakeout reversal — saat TP fire lalu harga reverse balik:
 
 ## Circuit Breaker (`data/circuit_breaker.json`)
 
-**`CB_ENABLED=False` di .env.local untuk paper trade phase.**
-Setelah validasi 30+ trades, enable lagi sebelum live.
+**`CB_ENABLED=False` untuk paper trade phase.**
 
 - Saklar 1: daily loss > 20% → pause sampai besok (auto-reset)
 - Saklar 2: 5x consecutive loss → pause (manual reset)
@@ -186,22 +198,7 @@ Setelah validasi 30+ trades, enable lagi sebelum live.
   "saklar_3_triggered": false
 }
 ```
-`starting_capital` SELALU = 120 (SALDO_AWAL), bukan current_capital. CB hitung drawdown dari sini.
-
----
-
-## Next Steps
-
-| Priority | Task |
-|---|---|
-| 🔴 | Pantau 30+ trade hourly GBM, validasi winrate ≥ 60% & edge realisasi ≈ edge predicted |
-| 🟢 | ~~Feed GBM `prob_up` ke Kelly winrate~~ — sudah aktif (`buy_winrate = clamp(prob_up, 0.50, 0.80)`) |
-| 🟢 | ~~Tune `UPDOWN_HOURLY_GBM_MIN_EDGE`~~ — vol-adj threshold sudah aktif (DOGE→10%, BTC→4.4%) |
-| 🟢 | ~~Exit Telegram alerts~~ — done, setiap exit (TP/SL) kirim alert ke bot |
-| 🟡 | Cek log VOL per cycle — pastikan semua 6 symbol fetch OK (jangan fallback ke DEFAULT 40%) |
-| 🟡 | Fix CB: cari kenapa `starting_capital` kadang berubah ke `current_capital` |
-| 🟡 | Setup cron recalibrate di VPS |
-| 🟢 | Go live (CB_ENABLED=True) setelah paper trade terbukti edge |
+`starting_capital` SELALU = 120 (SALDO_AWAL). CB hitung drawdown dari sini.
 
 ---
 
@@ -210,5 +207,5 @@ Setelah validasi 30+ trades, enable lagi sebelum live.
 ```bash
 pytest tests/ -q --tb=short --ignore=tests/test_async_binance.py
 ```
-519 tests pass. Test files: `tests/test_*.py` (1:1 dengan modul di `src/`).
-Pre-existing failures: `test_async_binance.py` (14 tests, unrelated to current work).
+Tests dikosongkan saat refactor. Tulis ulang setelah strategy stabil.
+Pre-existing failures: `test_async_binance.py` (14 tests, unrelated).

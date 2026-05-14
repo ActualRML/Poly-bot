@@ -4,7 +4,7 @@ from typing import Optional
 import uuid
 
 from src.models.types import Order, Snapshot, SisiOrder, StatusOrder, TipeOrder
-from src.logic.pricing import ke_decimal
+from src.risk.pricing import ke_decimal
 from src.utils.config import config
 from src.utils.logger import log
 

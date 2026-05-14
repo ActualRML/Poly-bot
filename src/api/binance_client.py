@@ -401,7 +401,7 @@ async def fetch_technical_signals(
     Returns RSI, Z-score, volume-spike, and trend from 1h Binance klines.
     Cached for _TECH_TTL seconds. Returns {} on fetch failure (caller skips filter).
     """
-    from src.logic.technical import compute_rsi, compute_zscore, detect_volume_spike, compute_trend
+    from src.scout.technical import compute_rsi, compute_zscore, detect_volume_spike, compute_trend
 
     symbol = symbol.upper()
     now = datetime.now(timezone.utc).timestamp()
@@ -447,7 +447,7 @@ async def fetch_trend_bias(
     Fetch 28 bars of 1h klines and return EMA-based trend bias in [-0.10, +0.10].
     Returns 0.0 on fetch failure (neutral — no bias applied).
     """
-    from src.logic.technical import compute_trend_bias as _ctb
+    from src.scout.technical import compute_trend_bias as _ctb
 
     symbol = symbol.upper()
     cache_key = f"{symbol}_trend_bias"

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from src.logic.pricing import ke_decimal, validasi_harga
+from src.risk.pricing import ke_decimal, validasi_harga
 from src.utils.config import config
 
 import math as _math

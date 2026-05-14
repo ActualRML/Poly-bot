@@ -209,7 +209,7 @@ async def cross_asset_correlation(
     align_threshold: float = 0.7,
 ) -> dict:
     """Fetch recent moves for the crypto basket, then classify alignment."""
-    from src.logic.updown_strategy import calculate_recent_momentum
+    from src.execute.updown import calculate_recent_momentum
 
     tasks = [
         calculate_recent_momentum(s, session, minutes=lookback_min)

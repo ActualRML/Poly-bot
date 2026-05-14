@@ -3,7 +3,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.logic.exit_strategy import Position, ExitEvaluator, ExitDecision, PortfolioExitManager
+from src.execute.exit import Position, ExitEvaluator, ExitDecision, PortfolioExitManager
 from src.models.database import (
     init_db,
     save_position,
@@ -18,7 +18,7 @@ from src.models.database import (
     get_stats,
     resolve_prediction,
 )
-from src.logic.pricing import ke_decimal
+from src.risk.pricing import ke_decimal
 
 logger = logging.getLogger(__name__)
 

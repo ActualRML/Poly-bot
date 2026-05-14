@@ -379,7 +379,7 @@ async def calculate_scalping_signals(
     renko_dir, renko_consec = renko["direction"], renko["consecutive"]
     noise_level = "low" if renko_consec >= 2 else ("medium" if renko_consec == 1 else "high")
 
-    from src.logic.scalping_exit import volatility_kelly_mult as _vkm
+    from src.execute.scalping import volatility_kelly_mult as _vkm
     kelly_multiplier = _vkm(atr_val or 0.0, atr_avg)
 
     # ── Layer 2: Order flow ───────────────────────────────────────────────

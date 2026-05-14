@@ -26,7 +26,7 @@ from typing import Optional
 
 import aiohttp
 
-from src.logic.oracle_arb import gbm_prob_above
+from src.scout.oracle_arb import gbm_prob_above
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ async def get_hourly_strike(
     Fetch the 1h candle open at start_date as the strike. Cached per
     (symbol, start_date_iso) for STRIKE_CACHE_TTL_S.
     """
-    from src.logic.updown_strategy import fetch_reference_price_hourly
+    from src.execute.updown import fetch_reference_price_hourly
 
     key = (symbol.upper(), start_date.isoformat())
     cached = _strike_cache.get(key)

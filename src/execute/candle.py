@@ -5,8 +5,8 @@ import json as _json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from src.logic.slot_manager import slot_history_count, record_slot_entry
-from src.logic.symbol_blacklist import check_symbol_blacklist
+from src.risk.slots import slot_history_count, record_slot_entry
+from src.risk.blacklist import check_symbol_blacklist
 
 import aiohttp
 
@@ -136,12 +136,12 @@ async def analyze_candle_market(
     using 15m BTC momentum. Asymmetric exit: SL at 50%, profit lock T1/T2.
     Reverse re-entry after SL if momentum flips.
     """
-    from src.logic.pricing import ke_decimal
+    from src.risk.pricing import ke_decimal
     from src.api.binance_client import fetch_klines
     from src.models.database import log_prediction, get_recent_closed_pnls
     from src.models.types import SisiOrder
-    from src.logic.risk_manager import calculate_position_size
-    from src.logic.reentry import check_candle_reverse_reentry
+    from src.risk.manager import calculate_position_size
+    from src.execute.reentry import check_candle_reverse_reentry
     from src.utils.telegram_alert import get_alert
 
     symbol = market.get("_symbol", "")

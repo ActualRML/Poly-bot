@@ -99,23 +99,6 @@ class GammaClient:
             max_days_to_resolve, min_days_to_resolve
         )
 
-    async def ascan_hourly_opportunities(
-        self,
-        session: aiohttp.ClientSession,
-        min_volume: float = 500,
-        min_liquidity: float = 200,
-        max_minutes_to_resolve: int = 90,
-        min_minutes_to_resolve: int = 5,
-        limit: int = 500,
-    ) -> list[dict]:
-        markets = await self.aget_markets(
-            session, limit=limit, active=True, closed=False
-        )
-        return self._filter_markets_hourly(
-            markets, min_volume, min_liquidity,
-            max_minutes_to_resolve, min_minutes_to_resolve,
-        )
-
     def get_markets(
         self,
         limit: int = 100,
@@ -176,105 +159,6 @@ class GammaClient:
         "nascar",
         "formula",
     }
-
-    def _filter_markets_hourly(
-        self,
-        markets: list[dict],
-        min_volume: float,
-        min_liquidity: float,
-        max_minutes_to_resolve: int,
-        min_minutes_to_resolve: int,
-    ) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        results = []
-        skip = {"status": 0, "orderbook": 0, "category": 0, "volume": 0, "liquidity": 0, "time": 0}
-
-        for m in markets:
-            mid = (m.get("conditionId") or m.get("id") or "?")[:8]
-            try:
-                if m.get("closed") is True:
-                    logger.debug(f"Skip {mid}: closed=true")
-                    skip["status"] += 1
-                    continue
-                if m.get("active") is False:
-                    logger.debug(f"Skip {mid}: active=false")
-                    skip["status"] += 1
-                    continue
-                if m.get("archived") is True:
-                    logger.debug(f"Skip {mid}: archived=true")
-                    skip["status"] += 1
-                    continue
-                if m.get("resolved") is True:
-                    logger.debug(f"Skip {mid}: resolved=true")
-                    skip["status"] += 1
-                    continue
-
-                if m.get("enableOrderBook") is False:
-                    logger.debug(f"Skip {mid}: enableOrderBook=false")
-                    skip["orderbook"] += 1
-                    continue
-
-                events_list = m.get("events") or []
-                series_slug = ""
-                if events_list and isinstance(events_list, list):
-                    series_slug = (events_list[0].get("seriesSlug") or "").lower()
-                if series_slug and any(kw in series_slug for kw in self.SKIP_SERIES_KEYWORDS):
-                    logger.debug(f"Skip {mid}: seriesSlug={series_slug!r}")
-                    skip["category"] += 1
-                    continue
-
-                volume = float(m.get("volume", 0) or 0)
-                if volume < min_volume:
-                    logger.debug(f"Skip {mid}: volume ${volume:,.0f} < ${min_volume:,.0f}")
-                    skip["volume"] += 1
-                    continue
-
-                liquidity = float(m.get("liquidity", 0) or 0)
-                if liquidity < min_liquidity:
-                    logger.debug(f"Skip {mid}: liquidity ${liquidity:,.0f} < ${min_liquidity:,.0f}")
-                    skip["liquidity"] += 1
-                    continue
-
-                end_date_str = m.get("endDate") or m.get("end_date_iso")
-                if not end_date_str:
-                    logger.debug(f"Skip {mid}: endDate missing")
-                    skip["time"] += 1
-                    continue
-
-                end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-                minutes_to_resolve = (end_date - now).total_seconds() / 60
-
-                if minutes_to_resolve < min_minutes_to_resolve:
-                    logger.debug(
-                        f"Skip {mid}: {minutes_to_resolve:.0f} min "
-                        f"< min {min_minutes_to_resolve}"
-                    )
-                    skip["time"] += 1
-                    continue
-                if minutes_to_resolve > max_minutes_to_resolve:
-                    logger.debug(
-                        f"Skip {mid}: {minutes_to_resolve:.0f} min "
-                        f"> max {max_minutes_to_resolve}"
-                    )
-                    skip["time"] += 1
-                    continue
-
-                m["minutes_to_resolve"] = round(minutes_to_resolve, 1)
-                m["days_to_resolve"]    = minutes_to_resolve / 1440.0
-                m["scan_timestamp"]     = now.isoformat()
-                results.append(m)
-
-            except (ValueError, TypeError, KeyError) as e:
-                logger.debug(f"Skip {mid}: parse error: {e}")
-                continue
-
-        logger.info(
-            f"Hourly scan: {len(results)}/{len(markets)} lolos | "
-            f"skip: status={skip['status']} orderbook={skip['orderbook']} "
-            f"category={skip['category']} vol={skip['volume']} "
-            f"liq={skip['liquidity']} time={skip['time']}"
-        )
-        return results
 
     def _filter_markets(
         self,

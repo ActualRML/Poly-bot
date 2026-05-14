@@ -58,7 +58,7 @@ class Config:
     HOURLY_LATE_SL_T4_PCT              : float = _get_float("HOURLY_LATE_SL_T4_PCT", -45.0)
     HOURLY_LATE_SL_T4_MAX_REMAINING    : float = _get_float("HOURLY_LATE_SL_T4_MAX_REMAINING", 40.0)
 
-    HOURLY_FLIP_TRIGGER_PCT      : float = _get_float("HOURLY_FLIP_TRIGGER_PCT", -20.0)
+    HOURLY_FLIP_TRIGGER_PCT      : float = _get_float("HOURLY_FLIP_TRIGGER_PCT", -40.0)
     HOURLY_FLIP_MAX_ENTRY        : float = _get_float("HOURLY_FLIP_MAX_ENTRY", 0.72)
     HOURLY_FLIP_MIN_MINUTES      : float = _get_float("HOURLY_FLIP_MIN_MINUTES", 35.0)
     HOURLY_FLIP_PRICE_BUFFER_PCT : float = _get_float("HOURLY_FLIP_PRICE_BUFFER_PCT", 0.02)
@@ -90,6 +90,10 @@ class Config:
     UPDOWN_HOURLY_MOMENTUM_THRESHOLD  : float = _get_float("UPDOWN_HOURLY_MOMENTUM_THRESHOLD", 0.002)
     UPDOWN_HOURLY_MOMENTUM_MAX        : float = _get_float("UPDOWN_HOURLY_MOMENTUM_MAX", 0.008)
     UPDOWN_HOURLY_MAX_ENTRY_PRICE     : float = _get_float("UPDOWN_HOURLY_MAX_ENTRY_PRICE", 0.45)
+    UPDOWN_HOURLY_MIN_ENTRY_PRICE     : float = _get_float("UPDOWN_HOURLY_MIN_ENTRY_PRICE", 0.40)
+    UPDOWN_HOURLY_SKIP_SYMBOLS        : str   = _get("UPDOWN_HOURLY_SKIP_SYMBOLS", "DOGE,BNB")
+    UPDOWN_HOURLY_ASIA_KELLY_CAP      : float = _get_float("UPDOWN_HOURLY_ASIA_KELLY_CAP", 1.0)
+    UPDOWN_HOURLY_US_MAIN_KELLY_CAP   : float = _get_float("UPDOWN_HOURLY_US_MAIN_KELLY_CAP", 0.7)
     HOURLY_TRAILING_ACTIVATE_PCT      : float = _get_float("HOURLY_TRAILING_ACTIVATE_PCT", 15.0)
     HOURLY_TRAILING_RETRACE_PCT       : float = _get_float("HOURLY_TRAILING_RETRACE_PCT", 0.30)
     UPDOWN_HOURLY_USE_GBM             : bool  = _get_bool("UPDOWN_HOURLY_USE_GBM", True)
@@ -129,12 +133,28 @@ class Config:
 
     UPDOWN_HOURLY_USE_TREND_BIAS      : bool  = _get_bool("UPDOWN_HOURLY_USE_TREND_BIAS", False)
     UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT: int   = _get_int("UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", 8)
+    UPDOWN_SCOUT_ENABLED   : bool  = _get_bool("UPDOWN_SCOUT_ENABLED", False)
+    UPDOWN_SCOUT_MIN_SCORE : int   = _get_int("UPDOWN_SCOUT_MIN_SCORE", 3)
+
+    RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.15)
+    RISK_MIN_SIZE_PCT  : float = _get_float("RISK_MIN_SIZE_PCT", 0.08)
+    RISK_MAX_SIZE_PCT  : float = _get_float("RISK_MAX_SIZE_PCT", 0.20)
 
     CB_ENABLED       : bool    = _get_bool("CB_ENABLED", False)
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
     POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
     DRY_RUN          : bool    = _get_bool("DRY_RUN", True)
+
+    GEMINI_API_KEY              : str   = _get("GEMINI_API_KEY", "")
+    POLYMARKET_GEO_TOKEN        : str   = _get("POLYMARKET_GEO_TOKEN", "")
+    SCOUT_MIN_VOLUME_24H        : float = _get_float("SCOUT_MIN_VOLUME_24H", 50_000.0)
+    SCOUT_MAX_SPREAD_PCT        : float = _get_float("SCOUT_MAX_SPREAD_PCT", 0.08)
+    SCOUT_CATEGORIES            : str   = _get("SCOUT_CATEGORIES", "Crypto,Politics")
+    SCOUT_GEMINI_MODEL          : str   = _get("SCOUT_GEMINI_MODEL", "gemini-2.0-flash-lite")
+    SCOUT_GEMINI_MAX_CANDIDATES : int   = _get_int("SCOUT_GEMINI_MAX_CANDIDATES", 10)
+    SCOUT_INTERVAL_MINUTES      : int   = _get_int("SCOUT_INTERVAL_MINUTES", 5)
+
 
 config = Config()
 
