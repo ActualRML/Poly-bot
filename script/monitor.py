@@ -92,7 +92,8 @@ def main():
             print(f"\n   {status} {pos['question'][:52]}")
             _strat = pos.get("strategy_mode", "")
             _gap_label = (
-                "GBM edge" if "hourly" in _strat
+                "GBM edge" if ("hourly" in _strat and "gbm" in _strat)
+                else "Mom"     if "hourly" in _strat
                 else "BTC mom" if "candle" in _strat
                 else "Gap"
             )
@@ -147,7 +148,8 @@ def main():
             return v * 100 if v <= 1.0 else v
 
         def _is_gbm(p):
-            return "hourly" in (p.get("strategy_mode") or "")
+            strat = p.get("strategy_mode") or ""
+            return "hourly" in strat and "gbm" in strat
 
         high_edge = [p for p in positions if _is_gbm(p) and _edge(p) > 15]
         low_edge  = [p for p in positions if _is_gbm(p) and _edge(p) < 5]

@@ -132,8 +132,8 @@ Skip: 5m dan 15m markets.
 ### Profit Lock
 | Tier | PnL trigger | Time gate |
 |---|---|---|
-| T1 | >= 200% | > 5m left |
-| T2 | >= 150% | > 15m left |
+| T1 | >= 80%  | > 5m left  |
+| T2 | >= 50%  | > 15m left |
 
 Selain itu → HOLD ke resolve untuk full payout.
 

@@ -130,8 +130,8 @@ class ExitEvaluator:
         hourly_late_sl_t4_pct: float = -45.0,
         hourly_late_sl_t4_max_remaining: float = 40.0,
         # Profit lock for hourly — fire pada profit besar, otherwise hold to resolve.
-        # T1 (≥200%): near-max ITM, kunci kapan saja >5m left
-        # T2 (≥150%): substantial profit, kunci kalau masih banyak waktu (>15m)
+        # T1 (≥80%): near-max ITM, kunci kapan saja >5m left
+        # T2 (≥50%): substantial profit, kunci kalau masih banyak waktu (>15m)
         hourly_lock_t1_pct: float = 80.0,
         hourly_lock_t1_min_remaining: float = 5.0,
         hourly_lock_t2_pct: float = 50.0,
@@ -235,47 +235,16 @@ class ExitEvaluator:
             # SL: higher vol → more lenient (multiply threshold → bigger negative)
             _t1_pct = max(self.hourly_late_sl_t1_pct * _scale, -95.0)
             _t2_pct = max(self.hourly_late_sl_t2_pct * _scale, -80.0)
-            _t3_pct = max(self.hourly_late_sl_t3_pct * _scale, -60.0)
             # TP: higher vol → lock sooner (lower PnL threshold, wider time gate)
             _lock_t1_pct     = max(self.hourly_lock_t1_pct     / _scale, 80.0)
             _lock_t2_pct     = max(self.hourly_lock_t2_pct     / _scale, 40.0)
             _lock_t1_min_rem = self.hourly_lock_t1_min_remaining * _scale
             _lock_t2_min_rem = self.hourly_lock_t2_min_remaining * _scale
 
-            # Tiered late-stage SL with EXCLUSIVE bands (no overlap).
-            # Threshold tumbuh seiring mendekati resolve karena slippage + result decided.
-            #
-            # T4 (20-40m, EARLY):  PnL ≤ -45%  → momentum continuation cut
-            # T3 (10-20m, OUTER):  PnL ≤ -30%  → cut early, redeploy capital
-            # T2 (5-10m,  MIDDLE): PnL ≤ -50%
-            # T1 (0-5m,   INNER):  PnL ≤ -70%  → only extreme, slippage too costly otherwise
-            #
-            # T4 dan T3 punya min age guard: late entry butuh ruang napas sebelum SL aktif.
-            _age_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
-            _sl_min_age = getattr(config, "HOURLY_SL_MIN_AGE_MINUTES", 10.0)
-            _t4_pct = max(self.hourly_late_sl_t4_pct * _scale, -70.0)
-            if (self.hourly_late_sl_t3_max_remaining < mins <= self.hourly_late_sl_t4_max_remaining
-                    and pnl_pct <= _t4_pct
-                    and _age_min >= _sl_min_age):
-                return ExitDecision(
-                    signal=ExitSignal.EXIT_CATASTROPHIC,
-                    should_exit=True,
-                    position=pos,
-                    estimated_pnl_usdc=self._calc_pnl(pos),
-                    suggested_exit_price=pos.current_price,
-                    reason=f"Late-SL EARLY: {pnl_pct:.0f}% with {mins:.0f}m left",
-                )
-            if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
-                    and pnl_pct <= _t3_pct
-                    and _age_min >= _sl_min_age):
-                return ExitDecision(
-                    signal=ExitSignal.EXIT_CATASTROPHIC,
-                    should_exit=True,
-                    position=pos,
-                    estimated_pnl_usdc=self._calc_pnl(pos),
-                    suggested_exit_price=pos.current_price,
-                    reason=f"Late-SL OUTER: {pnl_pct:.0f}% with {mins:.0f}m left",
-                )
+            # SL only active in final 10 minutes.
+            # T2 (5-10m, MIDDLE): PnL ≤ -50%
+            # T1 (0-5m,  INNER):  PnL ≤ -70%
+            # Before 10m: hold — binary market EV favors holding for contrarian signals.
             if (self.hourly_late_sl_t1_max_remaining < mins <= self.hourly_late_sl_t2_max_remaining
                     and pnl_pct <= _t2_pct):
                 return ExitDecision(

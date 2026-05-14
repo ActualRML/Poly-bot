@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 MIN_STOP_FRACTION: float    = 0.05
 MAX_STOP_FRACTION: float    = 0.45
 
-MIN_POSITION_USDC: float    = 5.0
+MIN_POSITION_USDC: float    = 10.0
 MAX_POSITION_USDC: float    = 30.0
 BASE_POSITION_USDC: float   = 20.0
 

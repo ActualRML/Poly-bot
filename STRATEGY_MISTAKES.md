@@ -363,6 +363,43 @@ T2 dan T1 tidak perlu guard karena saat mereka aktif, late entry sudah cukup tua
 
 ---
 
+## [2026-05-14] Vol-adjusted threshold FACTOR=0.50 terlalu longgar → entries di <1σ → contrarian no edge
+
+**Kesalahan**: Setelah fix "bot tidak entry di flat market", threshold dinaikkan ke
+`max(0.001, vol_15m * 0.50)`. Tapi FACTOR=0.50 dan MIN=0.001 masih terlalu longgar —
+semua 3 asset loss punya momentum hanya 0.10-0.14% (0.5-1.5σ dalam 15m).
+
+| Asset | vol_15m | Threshold | Mom entry | Hasil |
+|---|---|---|---|---|
+| SOL | 0.21% | max(0.10%, 0.106%) = 0.106% | ~0.14% | MASUK → LOSE |
+| XRP | 0.077% | max(0.10%, 0.039%) = 0.10% | ~0.12% | MASUK → LOSE |
+| DOGE | 0.13% | max(0.10%, 0.064%) = 0.10% | ~0.12% | MASUK → LOSE |
+
+Momentum 0.5-1.5σ dalam 15m lebih sering BERLANJUT daripada berbalik — tidak ada
+contrarian edge di level ini.
+
+**Akibat**: 3 loss berturut-turut di slot 10AM UTC, total -$10.68. SOL -$2.89, XRP -$3.48,
+DOGE -$4.31.
+
+**Root cause**: MIN=0.001 (0.10%) menjadi effective floor untuk semua low-vol asset, karena
+vol_15m mereka di bawah 0.20%. Floor ini setara hanya ~0.5σ — terlalu lemah untuk reliable
+mean reversion. Contrarian butuh minimal 1-2σ signal.
+
+**Fix** (config only — `.env.example`):
+- `UPDOWN_HOURLY_MOMENTUM_MIN=0.0015` (was 0.001) — floor naik ke ~1σ
+- `UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR=0.75` (was 0.50) — high-vol asset juga lebih ketat
+- `UPDOWN_HOURLY_OPPOSITE_REENTRY=false` (was true) — disable flip langsung setelah TP
+- `UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT=4` (was 8) — kurangi exposure per slot
+
+Dengan MIN=0.0015 dan FACTOR=0.75: SOL threshold 0.159%, XRP 0.15%, DOGE 0.15% — semua 3
+entry di atas terblokir.
+
+**Pelajaran**: Untuk contrarian mean reversion, threshold signal HARUS ≥ 1σ dalam timeframe
+entry. Momentum di bawah 1σ lebih sering berlanjut (trend following) daripada berbalik.
+Saat fix "bot terlalu strict", jangan turunkan threshold ke bawah 1σ.
+
+---
+
 ## Template untuk entry baru
 
 ## [YYYY-MM-DD] Judul singkat kesalahan

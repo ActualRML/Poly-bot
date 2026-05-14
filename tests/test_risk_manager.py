@@ -15,7 +15,7 @@ def test_no_trades_with_capital():
 
 def test_loss_streak_with_capital():
     size = calculate_position_size([L, L], capital=70.0)
-    assert abs(size - 5.6) < 0.01
+    assert size == 10.0
 
 
 def test_win_streak_with_capital():
