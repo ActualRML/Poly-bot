@@ -23,18 +23,18 @@ SYMBOL_MAP = {
 
 _price_cache: dict[str, float] = {}
 _price_cache_time: dict[str, float] = {}
-_PRICE_TTL = 60
+_PRICE_TTL = 180
 
 _vol_cache: dict[str, float] = {}
 _vol_cache_time: dict[str, float] = {}
-_VOL_TTL = 300
+_VOL_TTL = 600
 
 _tech_cache: dict[str, dict] = {}
 _tech_cache_time: dict[str, float] = {}
-_TECH_TTL = 60
+_TECH_TTL = 180
 
 _klines_cache: dict[str, tuple[list, float]] = {}
-_KLINES_TTL = 90
+_KLINES_TTL = 180
 
 _ban_until: float = 0.0
 _BAN_COOLDOWN = 300

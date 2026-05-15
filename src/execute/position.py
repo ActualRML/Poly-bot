@@ -23,7 +23,7 @@ from src.risk.pricing import ke_decimal
 logger = logging.getLogger(__name__)
 
 MAX_OPEN_POSITIONS = 5
-MAX_CAPITAL_PER_MARKET = 30
+MAX_CAPITAL_PER_MARKET = 75
 
 class PositionManager:
 

@@ -30,6 +30,7 @@ class ExitSignal(Enum):
     HOLD_TO_RESOLVE  = "hold_to_resolve"
     EXIT_STALE       = "exit_stale"
     EXIT_CATASTROPHIC = "exit_catastrophic"
+    EXIT_TIMEOUT     = "exit_timeout"
 
 @dataclass
 class Position:
@@ -62,6 +63,11 @@ class Position:
     def days_held(self) -> int:
         now = datetime.now(timezone.utc)
         return (now - self.entry_time).days
+
+    @property
+    def minutes_held(self) -> float:
+        now = datetime.now(timezone.utc)
+        return (now - self.entry_time).total_seconds() / 60.0
 
     @property
     def unrealized_pnl_pct(self) -> Decimal:
@@ -133,9 +139,9 @@ class ExitEvaluator:
         # T1 (≥80%): near-max ITM, kunci kapan saja >5m left
         # T2 (≥50%): substantial profit, kunci kalau masih banyak waktu (>15m)
         hourly_lock_t1_pct: float = 80.0,
-        hourly_lock_t1_min_remaining: float = 5.0,
+        hourly_lock_t1_min_remaining: float = 20.0,
         hourly_lock_t2_pct: float = 50.0,
-        hourly_lock_t2_min_remaining: float = 15.0,
+        hourly_lock_t2_min_remaining: float = 35.0,
     ):
         self.trailing_stop_pct = ke_decimal(trailing_stop_pct)
         self.profit_threshold = ke_decimal(profit_threshold)
@@ -171,7 +177,7 @@ class ExitEvaluator:
 
     def evaluate(self, pos: Position, candle_early_sl_pct: float = 0.50) -> ExitDecision:
         # Candle strategy: simple early price-based SL (50% of entry), then profit lock.
-        if pos.strategy_mode in self._CANDLE_STRATEGIES:
+        if pos.strategy_mode.startswith("updown_candle"):
             pnl_pct = float(pos.unrealized_pnl_pct)
             mins    = pos.minutes_to_resolve
 
@@ -191,6 +197,22 @@ class ExitEvaluator:
                         f"Candle SL: {pnl_pct:.0f}% "
                         f"(cur {float(pos.current_price):.3f} ≤ "
                         f"floor {sl_floor:.3f})"
+                    ),
+                )
+
+            # Hold-limit: force exit if held > N min and still losing
+            _hold_limit   = getattr(config, "CANDLE_HOLD_LIMIT_MIN", 5.0)
+            _hold_pnl_thr = getattr(config, "CANDLE_HOLD_LIMIT_PNL_PCT", 0.0)
+            if pos.minutes_held > _hold_limit and pnl_pct < _hold_pnl_thr:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_TIMEOUT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=(
+                        f"Candle timeout: held {pos.minutes_held:.1f}m > {_hold_limit:.0f}m, "
+                        f"PnL {pnl_pct:+.1f}% < {_hold_pnl_thr:.0f}%"
                     ),
                 )
 
@@ -226,7 +248,7 @@ class ExitEvaluator:
                 reason=f"Candle hold | PnL {pnl_pct:+.0f}% | {mins:.0f}m left",
             )
 
-        if pos.strategy_mode in self._HOURLY_STRATEGIES:
+        if pos.strategy_mode.startswith("updown_hourly"):
             pnl_pct = float(pos.unrealized_pnl_pct)
             mins = pos.minutes_to_resolve
 
@@ -241,10 +263,38 @@ class ExitEvaluator:
             _lock_t1_min_rem = self.hourly_lock_t1_min_remaining * _scale
             _lock_t2_min_rem = self.hourly_lock_t2_min_remaining * _scale
 
-            # SL only active in final 10 minutes.
-            # T2 (5-10m, MIDDLE): PnL ≤ -50%
-            # T1 (0-5m,  INNER):  PnL ≤ -70%
-            # Before 10m: hold — binary market EV favors holding for contrarian signals.
+            # Tiered SL bands with age protection (HOURLY_SL_MIN_AGE_MINUTES grace)
+            # T4 (20-40m, EARLY): PnL ≤ -45% — momentum continuation cut
+            # T3 (10-20m, OUTER): PnL ≤ -30% — early redeploy
+            # T2 (5-10m,  MIDDLE): PnL ≤ -50% — moderate loss cut
+            # T1 (0-5m,   INNER):  PnL ≤ -70% — extreme only
+            _age_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60.0
+            _sl_min_age = getattr(config, "HOURLY_SL_MIN_AGE_MINUTES", 10.0)
+            _t3_pct = max(self.hourly_late_sl_t3_pct * _scale, -60.0)
+            _t4_pct = max(self.hourly_late_sl_t4_pct * _scale, -75.0)
+
+            if (self.hourly_late_sl_t3_max_remaining < mins <= self.hourly_late_sl_t4_max_remaining
+                    and pnl_pct <= _t4_pct
+                    and _age_min >= _sl_min_age):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL EARLY: {pnl_pct:.0f}% with {mins:.0f}m left (age {_age_min:.0f}m)",
+                )
+            if (self.hourly_late_sl_t2_max_remaining < mins <= self.hourly_late_sl_t3_max_remaining
+                    and pnl_pct <= _t3_pct
+                    and _age_min >= _sl_min_age):
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_CATASTROPHIC,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason=f"Late-SL OUTER: {pnl_pct:.0f}% with {mins:.0f}m left (age {_age_min:.0f}m)",
+                )
             if (self.hourly_late_sl_t1_max_remaining < mins <= self.hourly_late_sl_t2_max_remaining
                     and pnl_pct <= _t2_pct):
                 return ExitDecision(

@@ -70,7 +70,9 @@ async def run_mispricing_mode(clob: ClobClient):
             hourly_late_sl_t4_pct           = getattr(config, "HOURLY_LATE_SL_T4_PCT", -45.0),
             hourly_late_sl_t4_max_remaining = getattr(config, "HOURLY_LATE_SL_T4_MAX_REMAINING", 40.0),
             hourly_lock_t1_pct           = getattr(config, "HOURLY_LOCK_T1_PCT", 80.0),
+            hourly_lock_t1_min_remaining = getattr(config, "HOURLY_LOCK_T1_MIN_REMAINING", 20.0),
             hourly_lock_t2_pct           = getattr(config, "HOURLY_LOCK_T2_PCT", 50.0),
+            hourly_lock_t2_min_remaining = getattr(config, "HOURLY_LOCK_T2_MIN_REMAINING", 35.0),
         ),
     )
     builder = BaseRateBuilder()
@@ -95,6 +97,21 @@ async def run_mispricing_mode(clob: ClobClient):
 
     async with aiohttp.ClientSession() as session:
         await backfill_missing_token_ids(gamma, session)
+
+        # Warmup Binance cache to avoid startup burst → FULL_PAUSE loop
+        log.info("[STARTUP] Warming up Binance cache (6 symbols)...")
+        from src.api.binance_client import fetch_klines, fetch_price
+        from src.scout.regime import CRYPTO_BASKET
+        for _sym in CRYPTO_BASKET:
+            try:
+                await fetch_price(_sym, session)
+                await fetch_klines(_sym, session, interval="1m", limit=30)
+                await fetch_klines(_sym, session, interval="5m", limit=30)
+                await asyncio.sleep(0.8)
+            except Exception as _e:
+                logger.debug(f"[STARTUP] {_sym} warmup error: {_e}")
+        log.info("[STARTUP] Cache warmup done.")
+
         await reconcile_positions(clob, gamma, manager, breaker, session)
 
         _cb_alerted = False
@@ -471,7 +488,9 @@ async def run_mispricing_mode(clob: ClobClient):
                         sess_info = _market_regime["session"]
                         log.info(
                             f"[MARKET REGIME] {_market_regime['regime']} "
-                            f"score={_market_regime['trend_score']} | "
+                            f"score={_market_regime['trend_score']} "
+                            f"vol={_market_regime.get('vol_state','?')} "
+                            f"({_market_regime.get('vol_annual', 0) or 0:.0%} ann) | "
                             f"cross={ca['aligned_count']}/{ca['total_count']} {ca.get('direction') or 'mixed'} "
                             f"avg={ca['avg_move_pct']:+.2%} | "
                             f"htf_1h={htf['tf_1h']} htf_4h={htf['tf_4h']} | "
@@ -683,16 +702,31 @@ async def run_mispricing_mode(clob: ClobClient):
 
                     _gbm_active    = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
                     _macro_gate_on = getattr(config, "UPDOWN_HOURLY_MACRO_TREND_GATE", True)
+                    _vol_state     = (_market_regime or {}).get("vol_state", "NORMAL")
+                    _flash_crash   = (
+                        _vol_state == "EXTREME_HIGH"
+                        and getattr(config, "FLASH_CRASH_HARD_SKIP", True)
+                    )
                     _regime_skip   = (
                         _macro_gate_on
-                        and _market_regime and _market_regime.get("skip_contrarian")
+                        and _market_regime
+                        and (
+                            _market_regime.get("skip_contrarian")
+                            or _vol_state == "EXTREME_HIGH"
+                        )
                         and not _gbm_active
                     )
-                    if _regime_skip:
+                    if _flash_crash:
+                        log.warning(
+                            f"[FLASH CRASH] vol={(_market_regime or {}).get('vol_annual', 0):.0%} annualized "
+                            f"(EXTREME_HIGH) — hard skip ALL entries: "
+                            f"{len(hourly_markets)} hourly + {len(candle_markets)} candle"
+                        )
+                    elif _regime_skip:
                         log.warning(
                             f"[MARKET REGIME] {_market_regime['regime']} terdeteksi — "
                             f"skip {len(hourly_markets)} hourly contrarian entry "
-                            f"(score {_market_regime['trend_score']} >= threshold)"
+                            f"(score {_market_regime['trend_score']} vol={_vol_state})"
                         )
                     else:
                         for hm in hourly_markets:
@@ -706,10 +740,13 @@ async def run_mispricing_mode(clob: ClobClient):
                                     btc_scalp=_btc_scalp,
                                     symbol_momentum_map=symbol_momentum_map,
                                     market_session=_market_session_label,
+                                    market_regime=_market_regime,
                                 )
                             except Exception as e:
                                 logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")
 
+                    if _flash_crash:
+                        candle_markets = []
                     for cm in candle_markets:
                         try:
                             await analyze_candle_market(

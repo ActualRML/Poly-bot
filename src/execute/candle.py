@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from src.risk.slots import slot_history_count, record_slot_entry
 from src.risk.blacklist import check_symbol_blacklist
+from src.risk.stagnation import track_market_price, get_price_velocity
+from src.scout.regime import classify_market_state
 
 import aiohttp
 
@@ -187,6 +189,8 @@ async def analyze_candle_market(
     if not (0.0 < market_price_up < 1.0):
         return
 
+    track_market_price(condition_id, market_price_up)
+
     start_date_str = market.get("_start_date", "")
     try:
         start_date = datetime.fromisoformat(start_date_str.replace("Z", "+00:00"))
@@ -283,6 +287,24 @@ async def analyze_candle_market(
             return
         is_half_size = False
         entry_reason = f"MOM_{momentum_15m:+.5f}"
+
+    # Per-market state filter: ILLIQUID / ONE_SIDED
+    _mkt_state = classify_market_state(
+        market_price_up    = market_price_up,
+        volume_24h         = float(market.get("volume", 0) or 0),
+        price_velocity     = get_price_velocity(condition_id),
+        intended_outcome   = buy_outcome,
+        vol_min_usd        = getattr(config, "CANDLE_MIN_VOLUME_USD", 1000.0),
+        one_sided_high     = getattr(config, "CANDLE_ONE_SIDED_HIGH", 0.82),
+        one_sided_low      = getattr(config, "CANDLE_ONE_SIDED_LOW", 0.18),
+        velocity_threshold = getattr(config, "CANDLE_VELOCITY_THR", 0.05),
+    )
+    if _mkt_state["state"] != "NORMAL":
+        log.info(
+            f"[CANDLE] {symbol} skip — market {_mkt_state['state']}: "
+            f"{', '.join(_mkt_state['reasons'])}"
+        )
+        return
 
     if buy_price > max_buy_price:
         logger.debug(

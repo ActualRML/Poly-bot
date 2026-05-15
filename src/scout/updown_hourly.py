@@ -36,6 +36,7 @@ async def analyze_updown_hourly_market(
     btc_scalp: dict | None = None,
     symbol_momentum_map: dict | None = None,
     market_session: str = "US_MAIN",
+    market_regime: dict | None = None,
 ):
     from src.risk.pricing import ke_decimal
 
@@ -114,6 +115,27 @@ async def analyze_updown_hourly_market(
         )
         return
 
+    # Event horizon tier gate
+    from src.scout.regime import classify_event_horizon as _classify_t
+    _t_min = delta_sec / 60.0
+    _use_gbm_now = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
+    _t_gate = _classify_t(
+        t_min              = _t_min,
+        strategy           = "gbm" if _use_gbm_now else "contrarian",
+        floor_min          = float(_min_t_min),
+        contrarian_min     = getattr(config, "UPDOWN_HOURLY_CONTRARIAN_MIN_T", 25.0),
+        tight_max          = getattr(config, "UPDOWN_HOURLY_T_TIER_TIGHT_MAX", 35.0),
+        critical_max       = getattr(config, "UPDOWN_HOURLY_T_TIER_CRITICAL_MAX", 25.0),
+        edge_mult_tight    = getattr(config, "UPDOWN_HOURLY_T_EDGE_MULT_TIGHT", 1.5),
+        edge_mult_critical = getattr(config, "UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL", 2.0),
+    )
+    if not _t_gate["allowed"]:
+        log.info(
+            f"[UPDOWN HOURLY] {symbol} skip — event horizon {_t_gate['tier']}: "
+            f"{_t_gate['reason']}"
+        )
+        return
+
     track_market_price(condition_id, market_price_up)
 
     slot_open_count = count_open_by_resolve_slot(end_date)
@@ -140,7 +162,11 @@ async def analyze_updown_hourly_market(
 
     sym_mtf = (symbol_momentum_map or {}).get(symbol.upper())
     if sym_mtf is None:
-        logger.warning(f"[UPDOWN HOURLY] {symbol} — no momentum data (Binance fetch failed?), skip")
+        from src.api.binance_client import get_rate_limit_status
+        if get_rate_limit_status().get("status") == "FULL_PAUSE":
+            logger.debug(f"[UPDOWN HOURLY] {symbol} skip — Binance pause aktif")
+        else:
+            logger.warning(f"[UPDOWN HOURLY] {symbol} — no momentum data (Binance fetch failed?), skip")
         return
 
     sym_momentum   = sym_mtf["m_15m"]
@@ -222,6 +248,14 @@ async def analyze_updown_hourly_market(
                     f"[UPDOWN HOURLY] {symbol} GBM regime surcharge +{config.UPDOWN_GBM_REGIME_SURCHARGE:.0%} "
                     f"(score={_trend_score} consensus={_cross_n}/{_cross_tot}) → adj_min_edge={_adj_min_edge:.1%}"
                 )
+
+        # Event horizon edge multiplier (TIGHT/CRITICAL tiers)
+        if _t_gate["edge_mult"] > 1.0:
+            _adj_min_edge = _adj_min_edge * _t_gate["edge_mult"]
+            logger.debug(
+                f"[UPDOWN HOURLY] {symbol} T={_t_min:.0f}m tier={_t_gate['tier']} "
+                f"→ edge mult ×{_t_gate['edge_mult']:.1f} → adj_min_edge={_adj_min_edge:.1%}"
+            )
         try:
             _gbm_decision = await evaluate_hourly_entry(
                 symbol          = symbol,
@@ -313,6 +347,27 @@ async def analyze_updown_hourly_market(
             f"consensus Down (<{1.0-_consensus_thr:.0%})"
         )
         return
+
+    # ── Per-market state gate: ILLIQUID / ONE_SIDED ──────────────────────────────
+    from src.scout.regime import classify_market_state as _classify_mkt
+    from src.risk.stagnation import get_price_velocity as _get_vel
+    _mkt_state = _classify_mkt(
+        market_price_up  = market_price_up,
+        volume_24h       = float(market.get("volume", 0) or 0),
+        price_velocity   = _get_vel(condition_id),
+        intended_outcome = buy_outcome,
+        vol_min_usd      = getattr(config, "UPDOWN_HOURLY_MIN_VOLUME_USD", 1000.0),
+        one_sided_high   = getattr(config, "UPDOWN_HOURLY_ONE_SIDED_HIGH", 0.82),
+        one_sided_low    = getattr(config, "UPDOWN_HOURLY_ONE_SIDED_LOW", 0.18),
+        velocity_threshold = getattr(config, "UPDOWN_HOURLY_VELOCITY_THR", 0.05),
+    )
+    if _mkt_state["state"] != "NORMAL":
+        log.info(
+            f"[UPDOWN HOURLY] {symbol} skip — "
+            f"market {_mkt_state['state']}: {', '.join(_mkt_state['reasons'])}"
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────────────
 
     if getattr(config, "UPDOWN_SCOUT_ENABLED", False):
         _scout_edge = (_gbm_decision["edge_up"] if buy_outcome == "Up" else _gbm_decision["edge_down"]) if _gbm_decision else 0.0
@@ -533,6 +588,26 @@ async def analyze_updown_hourly_market(
     }.get(market_session, 1.0)
     if _session_cap < 1.0:
         _scalp_kelly_mult = min(_scalp_kelly_mult, _session_cap)
+
+    # Vol-adjusted sizing: high vol → size down
+    if market_regime is not None:
+        _vol_s = market_regime.get("vol_state", "NORMAL")
+        _vol_km = {"EXTREME_HIGH": 0.50, "HIGH": 0.75}.get(_vol_s, 1.0)
+        if _vol_km < 1.0:
+            _scalp_kelly_mult = min(_scalp_kelly_mult, _vol_km)
+
+    # Conviction bonus: WIDE event horizon + non-volatile vol → reward sniper entry
+    _conv_bonus = getattr(config, "UPDOWN_HOURLY_CONVICTION_BONUS", 1.5)
+    if (
+        _t_gate.get("tier") == "WIDE"
+        and (market_regime or {}).get("vol_state") in ("NORMAL", "LOW", "EXTREME_LOW")
+        and _conv_bonus > 1.0
+    ):
+        _scalp_kelly_mult = _scalp_kelly_mult * _conv_bonus
+        logger.debug(
+            f"[UPDOWN HOURLY] {symbol} conviction bonus ×{_conv_bonus:.1f} "
+            f"(WIDE T + {_vol_s} vol) → km={_scalp_kelly_mult:.2f}"
+        )
 
     kelly = sizer.calculate(
         winrate      = buy_winrate,

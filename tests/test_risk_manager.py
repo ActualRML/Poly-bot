@@ -5,12 +5,12 @@ L = {"pnl": -1.0}
 
 
 def test_no_trades_no_capital():
-    assert calculate_position_size([]) == 20.0
+    assert calculate_position_size([]) == 30.0
 
 
 def test_no_trades_with_capital():
     size = calculate_position_size([], capital=70.0)
-    assert abs(size - 10.5) < 0.01
+    assert abs(size - 17.5) < 0.01
 
 
 def test_loss_streak_with_capital():
@@ -20,7 +20,7 @@ def test_loss_streak_with_capital():
 
 def test_win_streak_with_capital():
     size = calculate_position_size([W, W, W], capital=70.0)
-    assert abs(size - 14.0) < 0.01
+    assert abs(size - 28.0) < 0.01
 
 
 def test_min_floor_tiny_capital():
@@ -30,7 +30,7 @@ def test_min_floor_tiny_capital():
 
 def test_mixed_streak_no_streak():
     size = calculate_position_size([W, L], capital=70.0)
-    assert abs(size - 10.5) < 0.01
+    assert abs(size - 17.5) < 0.01
 
 
 def test_capital_zero_fallback_absolute():

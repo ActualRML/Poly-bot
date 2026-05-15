@@ -25,3 +25,20 @@ def is_price_stagnant(cid: str, lookback_s: float = 300, threshold_pct: float = 
     if p_min <= 0:
         return False
     return (p_max - p_min) / p_min < threshold_pct
+
+
+def get_price_velocity(cid: str, lookback_s: float = 300.0) -> float | None:
+    """% change in market_price_up over last lookback_s seconds. Positive = Up rising."""
+    import time as _t
+    hist = _market_price_history.get(cid, [])
+    if len(hist) < 3:
+        return None
+    cutoff = _t.monotonic() - lookback_s
+    window = [(p, t) for p, t in hist if t >= cutoff]
+    if len(window) < 3:
+        return None
+    oldest_p = window[0][0]
+    newest_p = window[-1][0]
+    if oldest_p <= 0:
+        return None
+    return (newest_p - oldest_p) / oldest_p

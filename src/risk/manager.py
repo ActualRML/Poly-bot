@@ -7,8 +7,19 @@ MIN_STOP_FRACTION: float    = 0.05
 MAX_STOP_FRACTION: float    = 0.45
 
 MIN_POSITION_USDC: float    = 10.0
-MAX_POSITION_USDC: float    = 30.0
-BASE_POSITION_USDC: float   = 20.0
+MAX_POSITION_USDC: float    = 75.0
+BASE_POSITION_USDC: float   = 30.0
+
+def vol_size_multiplier(vol_state: str) -> float:
+    """Size multiplier based on market volatility regime."""
+    return {
+        "EXTREME_HIGH": 0.50,
+        "HIGH":         0.75,
+        "NORMAL":       1.00,
+        "LOW":          1.10,
+        "EXTREME_LOW":  1.20,
+    }.get(vol_state, 1.00)
+
 
 def get_dynamic_stop_loss(
     current_P: float,

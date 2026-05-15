@@ -36,13 +36,13 @@ class Config:
     CLOB_HOST  : str = _get("CLOB_HOST", "https://clob.polymarket.com")
     GAMMA_HOST : str = _get("GAMMA_HOST", "https://gamma-api.polymarket.com")
 
-    KELLY_MULTIPLIER       : float = _get_float("KELLY_MULTIPLIER", 0.5)
+    KELLY_MULTIPLIER       : float = _get_float("KELLY_MULTIPLIER", 0.7)
     MAX_KELLY_FRACTION     : float = _get_float("MAX_KELLY_FRACTION", 0.30)
     MIN_BET_USDC           : float = _get_float("MIN_BET_USDC", 5.0)
     MIN_WINRATE            : float = _get_float("MIN_WINRATE", 0.15)
     MIN_PROFIT_PCT         : float = _get_float("MIN_PROFIT_PCT", 0.20)
     MAX_OPEN_POSITIONS     : int   = _get_int("MAX_OPEN_POSITIONS", 5)
-    MAX_CAPITAL_PER_MARKET : float = _get_float("MAX_CAPITAL_PER_MARKET", 30.0)
+    MAX_CAPITAL_PER_MARKET : float = _get_float("MAX_CAPITAL_PER_MARKET", 75.0)
     MAX_SAME_DIRECTION     : int   = _get_int("MAX_SAME_DIRECTION", 2)
     TRAILING_STOP_PCT       : float = _get_float("TRAILING_STOP_PCT", 0.15)
     TIGHT_TRAILING_STOP_PCT : float = _get_float("TIGHT_TRAILING_STOP_PCT", 0.07)
@@ -136,9 +136,9 @@ class Config:
     UPDOWN_SCOUT_ENABLED   : bool  = _get_bool("UPDOWN_SCOUT_ENABLED", False)
     UPDOWN_SCOUT_MIN_SCORE : int   = _get_int("UPDOWN_SCOUT_MIN_SCORE", 3)
 
-    RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.15)
+    RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.25)
     RISK_MIN_SIZE_PCT  : float = _get_float("RISK_MIN_SIZE_PCT", 0.08)
-    RISK_MAX_SIZE_PCT  : float = _get_float("RISK_MAX_SIZE_PCT", 0.20)
+    RISK_MAX_SIZE_PCT  : float = _get_float("RISK_MAX_SIZE_PCT", 0.40)
 
     CB_ENABLED       : bool    = _get_bool("CB_ENABLED", False)
     SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
