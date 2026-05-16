@@ -22,7 +22,7 @@ from src.risk.pricing import ke_decimal
 
 logger = logging.getLogger(__name__)
 
-MAX_OPEN_POSITIONS = 5
+MAX_OPEN_POSITIONS = 10
 MAX_CAPITAL_PER_MARKET = 75
 
 class PositionManager:
@@ -82,6 +82,13 @@ class PositionManager:
         kelly_fraction: float = 0.0,
         strategy_mode: str = "mispricing",
         token_id: str = "",
+        sym_m5m: Optional[float] = None,
+        sym_m15m: Optional[float] = None,
+        sym_m30m: Optional[float] = None,
+        vol_ratio: Optional[float] = None,
+        btc_m15m: Optional[float] = None,
+        regime_score: Optional[int] = None,
+        mtf_aligned: Optional[int] = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
 
@@ -100,6 +107,13 @@ class PositionManager:
             "gap_pct":        str(round(gap_pct, 4)),
             "kelly_fraction": str(round(kelly_fraction, 4)),
             "strategy_mode":  strategy_mode,
+            "sym_m5m":        sym_m5m,
+            "sym_m15m":       sym_m15m,
+            "sym_m30m":       sym_m30m,
+            "vol_ratio":      vol_ratio,
+            "btc_m15m":       btc_m15m,
+            "regime_score":   regime_score,
+            "mtf_aligned":    mtf_aligned,
         }
 
         try:

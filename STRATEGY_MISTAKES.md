@@ -4,31 +4,6 @@ Catat setiap keputusan strategy yang salah + root cause + fix, agar tidak diulan
 
 ---
 
-## [2026-05-11] GBM min_edge tidak di-scale ke volatilitas asset
-
-**Kesalahan**: GBM Hourly memakai `min_edge = 3%` flat untuk semua asset.
-Padahal untuk DOGE (vol=100%), edge 8% hanya butuh price deviation 0.27% dari
-candle open — jauh di bawah 1h sigma (1.07%). Sinyal = pure noise.
-
-**Akibat**: GBM Hourly WR = 20% (W=1 L=4), semua loss adalah DOGE.
-
-**Root cause**: `gbm_prob_above` sensitif terhadap vol — semakin tinggi vol,
-semakin kecil price move yang dibutuhkan untuk generate edge besar. Min_edge
-flat tidak cukup menyaring noise di high-vol assets.
-
-**Fix** (`src/main.py`):
-```python
-_vol_edge_factor = getattr(config, "UPDOWN_GBM_VOL_EDGE_FACTOR", 0.10)
-_adj_min_edge = max(config.UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual * _vol_edge_factor)
-```
-DOGE (100%) → min_edge 10%. BNB (56%) → 5.6%. BTC (44%) → 4.4%.
-
-**Pelajaran**: Untuk model probabilistik berbasis volatilitas, threshold entry
-HARUS di-scale terhadap vol. Edge yang sama tidak punya makna yang sama
-di asset berbeda.
-
----
-
 ## [2026-05-11] gap_pct di DB punya makna berbeda per strategy
 
 **Kesalahan**: Monitor menampilkan label "Edge saat entry" untuk SEMUA posisi
@@ -342,24 +317,6 @@ T2 dan T1 tidak perlu guard karena saat mereka aktif, late entry sudah cukup tua
 
 **Pelajaran**: SL yang berbasis "sisa waktu" saja tidak cukup — harus juga pertimbangkan
 "berapa lama posisi sudah terbuka." Late entry membutuhkan grace period yang eksplisit.
-
----
-
-## [2026-05-12] Flip after loss diimplementasi tanpa guard harga dan momentum
-
-**Kesalahan**: Rencana awal flip hanya cek `pnl_pct ≤ -20%`, `mins ≥ 35`, dan `opp_price ≤ 0.72` — tanpa mempertimbangkan bahwa harga bisa sudah bergerak jauh sejak flip di-queue, atau momentum bisa berubah arah sebelum entry dieksekusi.
-
-**Akibat**: Potensi chain loss — exit rugi di -20% lalu masuk flip yang sudah stale (harga naik +5% dari titik antri). Atau masuk flip saat momentum justru berbalik arah lagi.
-
-**Root cause**: Flip queue di-generate saat exit, tapi diproses di cycle berikutnya (5 detik kemudian). Price dan momentum bisa berubah signifikan dalam interval ini, terutama untuk DOGE dan XRP yang volatile.
-
-**Fix** (`src/main.py` flip processor):
-1. **Price buffer**: batalkan flip jika `live_price > queued_price * 1.02` (max +2% slippage)
-2. **Momentum filter**: cek `symbol_momentum_map[sym]["m_5m"]` — flip→Down butuh m_5m < 0, flip→Up butuh m_5m > 0
-3. **Spread guard**: skip jika bid-ask spread > 3% (`clob.get_spread`)
-4. **Cooldown**: min 5 menit antar flip eksekusi per market
-
-**Pelajaran**: Setiap queued action yang dieksekusi asynchronously harus re-validate semua kondisi entry saat eksekusi, bukan hanya saat queue. Queue-time snapshot ≠ execution-time reality.
 
 ---
 

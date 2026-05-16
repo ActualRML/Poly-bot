@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS positions (
     gap_pct         TEXT,                   -- mispricing gap saat entry
     kelly_fraction  TEXT,                   -- kelly fraction yang dipakai
     strategy_mode   TEXT,                   -- mispricing | market_making
+    sym_m5m         REAL,                   -- symbol's own 5m momentum at entry
+    sym_m15m        REAL,                   -- symbol's own 15m momentum at entry
+    sym_m30m        REAL,                   -- symbol's own 30m momentum at entry
+    vol_ratio       REAL,                   -- volume ratio recent vs baseline
+    btc_m15m        REAL,                   -- BTC 15m momentum at entry (macro regime)
+    regime_score    INTEGER,                -- market regime score
+    mtf_aligned     INTEGER,                -- 1 if 5m/15m/30m aligned, else 0
     UNIQUE(condition_id, outcome)
 );
 
@@ -107,6 +114,13 @@ def _migrate(conn):
         "kelly_fraction": "ALTER TABLE positions ADD COLUMN kelly_fraction TEXT",
         "strategy_mode":  "ALTER TABLE positions ADD COLUMN strategy_mode TEXT",
         "token_id":       "ALTER TABLE positions ADD COLUMN token_id TEXT",
+        "sym_m5m":        "ALTER TABLE positions ADD COLUMN sym_m5m REAL",
+        "sym_m15m":       "ALTER TABLE positions ADD COLUMN sym_m15m REAL",
+        "sym_m30m":       "ALTER TABLE positions ADD COLUMN sym_m30m REAL",
+        "vol_ratio":      "ALTER TABLE positions ADD COLUMN vol_ratio REAL",
+        "btc_m15m":       "ALTER TABLE positions ADD COLUMN btc_m15m REAL",
+        "regime_score":   "ALTER TABLE positions ADD COLUMN regime_score INTEGER",
+        "mtf_aligned":    "ALTER TABLE positions ADD COLUMN mtf_aligned INTEGER",
     }
     for col, sql in new_columns.items():
         if col not in existing:
@@ -123,11 +137,13 @@ def save_position(pos: dict) -> int:
         INSERT INTO positions
             (condition_id, question, outcome, entry_price, current_price,
              highest_price, shares, capital_at_risk, resolve_date, entry_time,
-             gap_pct, kelly_fraction, strategy_mode, token_id)
+             gap_pct, kelly_fraction, strategy_mode, token_id,
+             sym_m5m, sym_m15m, sym_m30m, vol_ratio, btc_m15m, regime_score, mtf_aligned)
         VALUES
             (:condition_id, :question, :outcome, :entry_price, :current_price,
              :highest_price, :shares, :capital_at_risk, :resolve_date, :entry_time,
-             :gap_pct, :kelly_fraction, :strategy_mode, :token_id)
+             :gap_pct, :kelly_fraction, :strategy_mode, :token_id,
+             :sym_m5m, :sym_m15m, :sym_m30m, :vol_ratio, :btc_m15m, :regime_score, :mtf_aligned)
         ON CONFLICT(condition_id, outcome) DO UPDATE SET
             status          = 'open',
             question        = excluded.question,
@@ -142,6 +158,13 @@ def save_position(pos: dict) -> int:
             kelly_fraction  = excluded.kelly_fraction,
             strategy_mode   = excluded.strategy_mode,
             token_id        = excluded.token_id,
+            sym_m5m         = excluded.sym_m5m,
+            sym_m15m        = excluded.sym_m15m,
+            sym_m30m        = excluded.sym_m30m,
+            vol_ratio       = excluded.vol_ratio,
+            btc_m15m        = excluded.btc_m15m,
+            regime_score    = excluded.regime_score,
+            mtf_aligned     = excluded.mtf_aligned,
             exit_price      = NULL,
             exit_time       = NULL,
             pnl_usdc        = NULL,
@@ -158,6 +181,13 @@ def save_position(pos: dict) -> int:
     normalized.setdefault("kelly_fraction", None)
     normalized.setdefault("strategy_mode", None)
     normalized.setdefault("token_id", None)
+    normalized.setdefault("sym_m5m", None)
+    normalized.setdefault("sym_m15m", None)
+    normalized.setdefault("sym_m30m", None)
+    normalized.setdefault("vol_ratio", None)
+    normalized.setdefault("btc_m15m", None)
+    normalized.setdefault("regime_score", None)
+    normalized.setdefault("mtf_aligned", None)
 
     with get_conn() as conn:
         cur = conn.execute(sql, normalized)

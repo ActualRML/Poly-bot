@@ -294,7 +294,7 @@ async def analyze_candle_market(
         volume_24h         = float(market.get("volume", 0) or 0),
         price_velocity     = get_price_velocity(condition_id),
         intended_outcome   = buy_outcome,
-        vol_min_usd        = getattr(config, "CANDLE_MIN_VOLUME_USD", 1000.0),
+        vol_min_usd        = getattr(config, "CANDLE_MIN_VOLUME_USD", 500.0),
         one_sided_high     = getattr(config, "CANDLE_ONE_SIDED_HIGH", 0.82),
         one_sided_low      = getattr(config, "CANDLE_ONE_SIDED_LOW", 0.18),
         velocity_threshold = getattr(config, "CANDLE_VELOCITY_THR", 0.05),

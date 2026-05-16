@@ -7,9 +7,9 @@
 For new features or complex logic, run this internal process **before writing any code**. Skip for simple tasks ("fix typo", "change color").
 
 1. **Identity Split** — debate between:
-   - *Architect*: scalability, design patterns, clean code
-   - *Pragmatist*: simplicity, speed, no over-engineering
-   - *Security/QA*: edge cases, vulnerabilities, error handling
+   - _Architect_: scalability, design patterns, clean code
+   - _Pragmatist_: simplicity, speed, no over-engineering
+   - _Security/QA_: edge cases, vulnerabilities, error handling
 
 2. **Debate Phase** — 1–2 rounds of disagreement/alignment
 
@@ -70,7 +70,7 @@ script/monitor_bot.py     → Telegram bot interaktif (/status, /positions, /tra
 ## Config Files
 
 - `.env.secret` → credentials (gitignored)
-- `.env.local`  → strategy params (gitignored)
+- `.env.local` → strategy params (gitignored)
 - `.env.example` → template (committed) — **jangan commit env files**
 
 ---
@@ -78,19 +78,23 @@ script/monitor_bot.py     → Telegram bot interaktif (/status, /positions, /tra
 ## Strategies (semua paper trade, DRY_RUN=True, modal $120)
 
 ### 1. Crypto Daily
+
 Market "Will BTC be above $X?" resolve 5m–24h. Asset: BTC, ETH, SOL, BNB.
 Model: log-normal + barrier. Threshold dynamic: `vol/sqrt(24)*1.5` clamped [6%, 25%].
 Recalibrate: `python -m script.recalibrate` (setiap 30–60 hari).
 
 ### 2. Up/Down Daily
+
 Market "BTC Up or Down?" resolve 16:00 UTC. Asset: BTC (41), ETH (40), SOL (10086), XRP (10100).
 Ref price: Binance 1m close 16:00 UTC kemarin. Min edge: `UPDOWN_THRESHOLD=0.05`.
 
 ### 3. Up/Down Hourly — GBM PROBABILITY (directional fair-value)
+
 Market "BTC Up or Down - 1AM ET?" resolve tiap jam. Asset: BTC, ETH, SOL, XRP, DOGE, BNB.
 Skip: 5m dan 15m markets.
 
 **Direction logic — `src/scout/gbm.py`**:
+
 - Strike = Binance 1h candle open di start_date (cached per market)
 - `P(Up) = gbm_prob_above(current, strike, vol_annual, T_remaining)` (closed-form GBM)
 - `edge_up   = P(Up)     - market_price_up   - fee`
@@ -101,6 +105,7 @@ Skip: 5m dan 15m markets.
 - Toggle `UPDOWN_HOURLY_USE_GBM=false` → fallback ke contrarian lama
 
 **Filter stack** (tiap entry harus lolos semua):
+
 1. Slot cap: `MAX_POSITIONS_PER_SLOT=2` open + `_HOURLY_MAX_ENTRIES_PER_SLOT=3` cumulative
 2. Per-symbol blacklist: 3 loss berturut-turut → pause symbol 4 jam (wired di evaluate_exits + resolve_checker)
 3. Candle open delay: skip 5m awal candle (`UPDOWN_HOURLY_CANDLE_OPEN_MIN`)
@@ -119,6 +124,7 @@ Skip: 5m dan 15m markets.
 **`gap_pct` recorded di DB**: GBM mode → realized edge (e.g. 0.08 = 8%); contrarian mode → BTC 15m momentum (legacy).
 
 **Sizing**:
+
 - `buy_winrate = clamp(GBM prob_up, 0.50, 0.80)` — sisi yang dibeli; fallback 0.55 kalau GBM disabled
 - Kelly bet x `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; x1.2 mom aligned, x0.75 mom opposed)
 - Asia session: cap kelly_multiplier ke 0.7
@@ -130,10 +136,11 @@ Skip: 5m dan 15m markets.
 **Asimetris: profit lock cepat, SL hanya di akhir.**
 
 ### Profit Lock
-| Tier | PnL trigger | Time gate |
-|---|---|---|
-| T1 | >= 80%  | > 5m left  |
-| T2 | >= 50%  | > 15m left |
+
+| Tier | PnL trigger | Time gate  |
+| ---- | ----------- | ---------- |
+| T1   | >= 80%      | > 5m left  |
+| T2   | >= 50%      | > 15m left |
 
 Selain itu → HOLD ke resolve untuk full payout.
 
@@ -141,11 +148,12 @@ Selain itu → HOLD ke resolve untuk full payout.
 Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 
 ### Late-Stage SL
-| Band | Time range | Threshold |
-|---|---|---|
-| OUTER | 10–20m left | PnL <= -30% |
-| MIDDLE | 5–10m left | PnL <= -50% |
-| INNER | 0–5m left | PnL <= -70% |
+
+| Band   | Time range  | Threshold   |
+| ------ | ----------- | ----------- |
+| OUTER  | 10–20m left | PnL <= -30% |
+| MIDDLE | 5–10m left  | PnL <= -50% |
+| INNER  | 0–5m left   | PnL <= -70% |
 
 > 20m left → NO SL (kasih ruang recovery).
 
@@ -154,14 +162,16 @@ Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 ## Re-entry After Take-Profit
 
 ### Same-direction (`src/execute/reentry.py`)
+
 1. Drop >= 30% dari exit_price
 2. Fair value > current_price + fee + 5% edge
 3. Orderbook: spread <= 5%, liquidity cukup
 4. Time gate: >= 15m to resolve
 5. Slot cumulative cap belum penuh
-→ Re-entry @ **half size**.
+   → Re-entry @ **half size**.
 
 ### Opposite-direction (`src/scout/gbm.py:passes_opposite_reentry_gate`)
+
 1. `UPDOWN_HOURLY_OPPOSITE_REENTRY=true`
 2. Time floor: >= `UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES` (default 10m)
 3. GBM decision.outcome != locked_outcome
@@ -188,6 +198,7 @@ Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 - Saklar 3: drawdown > 40% → emergency stop (manual reset)
 
 **Manual reset** — edit `data/circuit_breaker.json`:
+
 ```json
 {
   "starting_capital": 120.0,
@@ -198,6 +209,7 @@ Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
   "saklar_3_triggered": false
 }
 ```
+
 `starting_capital` SELALU = 120 (SALDO_AWAL). CB hitung drawdown dari sini.
 
 ---
@@ -207,5 +219,26 @@ Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
 ```bash
 pytest tests/ -q --tb=short --ignore=tests/test_async_binance.py
 ```
+
 Tests dikosongkan saat refactor. Tulis ulang setelah strategy stabil.
 Pre-existing failures: `test_async_binance.py` (14 tests, unrelated).
+
+## STRATEGY AUDIT: CONTRARIAN MISALIGNMENT
+
+### 1. Performa Kolektif (Total Loss: -$37.03 | WR: 20%)
+
+- **Hourly Contrarian:** 7 Trades | 2W / 5L (WR 29%) | **PnL: -$29.02**
+- **Candle Scalper:** 3 Trades | 0W / 3L (WR 0%) | **PnL: -$8.01**
+- _Note: Logika Candle mirip dengan Hourly (bet against 15m momentum), sehingga menghasilkan win-rate hancur yang sama._
+
+### 2. Root Cause Analisis (Jebakan Pasar Trending)
+
+- **Thesis Bot:** Menggunakan prinsip _Mean Reversion_ (bertaruh harga pasti kembali ke rata-rata setelah jenuh). Bot mendeteksi koin turun selama 15 menit, lalu mengeksekusi aksi **Buy Up** dengan harga murah (kisaran $0.25 - $0.41).
+- **Miskalkulasi Fatal:** Kondisi pasar aktual sedang mengalami sentimen bearish yang masif (**Strong Trend Continuation / Crypto Bear Sentiment**). Bukannya berbalik arah (_reverse_), pasar justru terus melongsor turun kebawah secara agresif (SOL runtuh ke $0.04, BTC ambrol ke $0.01).
+- **Arah Taruhan Kontrarian:**
+  - **Buy Up:** 6 Trades | 2W | **PnL: -$26.83** (Sangat boncos akibat menangkap pisau jatuh)
+  - **Buy Down:** 1 Trade | 0W | **PnL: -$2.19**
+
+### 3. Status Sistem Saat Ini
+
+- **Exit Logic:** ✅ **WORKING PERFECTLY**. Semua posisi _loss_ berhasil di-cut secara disiplin oleh kombinasi mekanik `exit_timeout` (Candle 5m limit) dan `catastrophic SL` (T2/T4 bands), sehingga modal aman dari risiko amblas total ke $0.

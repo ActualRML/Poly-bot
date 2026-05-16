@@ -123,7 +123,7 @@ async def analyze_updown_hourly_market(
         t_min              = _t_min,
         strategy           = "gbm" if _use_gbm_now else "contrarian",
         floor_min          = float(_min_t_min),
-        contrarian_min     = getattr(config, "UPDOWN_HOURLY_CONTRARIAN_MIN_T", 25.0),
+        contrarian_min     = getattr(config, "UPDOWN_HOURLY_CONTRARIAN_MIN_T", 20.0),
         tight_max          = getattr(config, "UPDOWN_HOURLY_T_TIER_TIGHT_MAX", 35.0),
         critical_max       = getattr(config, "UPDOWN_HOURLY_T_TIER_CRITICAL_MAX", 25.0),
         edge_mult_tight    = getattr(config, "UPDOWN_HOURLY_T_EDGE_MULT_TIGHT", 1.5),
@@ -174,15 +174,15 @@ async def analyze_updown_hourly_market(
     sym_m30        = sym_mtf["m_30m"]
     sym_vol_ratio  = sym_mtf["vol_ratio"]
 
-    use_gbm = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
+    use_gbm = getattr(config, "UPDOWN_HOURLY_USE_GBM", False)
 
     if not use_gbm:
         _vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
         _vol_15m    = _vol_annual / (252 * 96) ** 0.5
-        _mom_min    = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MIN",        0.001)
-        _mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.50)
+        _mom_min    = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MIN",        0.0015)
+        _mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.75)
         regime_thr  = max(_mom_min, _vol_15m * _mom_factor)
-        regime_max = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MAX", 0.008)
+        regime_max = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MAX", 0.012)
         if abs(sym_momentum) < regime_thr:
             log.info(
                 f"[UPDOWN HOURLY] {symbol} skip — "
@@ -210,7 +210,10 @@ async def analyze_updown_hourly_market(
         )
         return
 
-    if is_price_stagnant(condition_id):
+    if is_price_stagnant(
+        condition_id,
+        threshold_pct=getattr(config, "UPDOWN_HOURLY_STAGNATION_THRESHOLD", 0.010),
+    ):
         logger.debug(
             f"[UPDOWN HOURLY] {symbol} — Polymarket price stagnan "
             f"(<0.5% range dalam 5m), skip"
@@ -356,7 +359,7 @@ async def analyze_updown_hourly_market(
         volume_24h       = float(market.get("volume", 0) or 0),
         price_velocity   = _get_vel(condition_id),
         intended_outcome = buy_outcome,
-        vol_min_usd      = getattr(config, "UPDOWN_HOURLY_MIN_VOLUME_USD", 1000.0),
+        vol_min_usd      = getattr(config, "UPDOWN_HOURLY_MIN_VOLUME_USD", 500.0),
         one_sided_high   = getattr(config, "UPDOWN_HOURLY_ONE_SIDED_HIGH", 0.82),
         one_sided_low    = getattr(config, "UPDOWN_HOURLY_ONE_SIDED_LOW", 0.18),
         velocity_threshold = getattr(config, "UPDOWN_HOURLY_VELOCITY_THR", 0.05),
@@ -499,16 +502,16 @@ async def analyze_updown_hourly_market(
             )
 
     _btc_corr_thr = getattr(config, "UPDOWN_HOURLY_BTC_CORR_THR", 0.005)
-    if use_gbm and symbol != "BTC" and _btc_corr_thr > 0 and symbol_momentum_map:
+    if symbol != "BTC" and _btc_corr_thr > 0 and symbol_momentum_map:
         _btc_mtf = symbol_momentum_map.get("BTC")
         if _btc_mtf is not None:
             _btc_15m = _btc_mtf.get("m_15m", 0.0) or 0.0
             if abs(_btc_15m) >= _btc_corr_thr:
                 _btc_dir = "Up" if _btc_15m > 0 else "Down"
                 if _btc_dir != buy_outcome:
-                    logger.debug(
-                        f"[UPDOWN HOURLY] {symbol} — BTC 15m {_btc_15m:+.3%} → {_btc_dir}, "
-                        f"opposes {buy_outcome}, skip (BTC lead)"
+                    log.info(
+                        f"[UPDOWN HOURLY] {symbol} skip — BTC 15m {_btc_15m:+.3%} → {_btc_dir} "
+                        f"opposes {buy_outcome} (BTC lead, thr={_btc_corr_thr:.2%})"
                     )
                     return
 
@@ -704,6 +707,16 @@ async def analyze_updown_hourly_market(
             else str(round(buy_winrate, 4))
         )
 
+        _diag_kwargs = {
+            "sym_m5m":      float(sym_m5) if sym_m5 is not None else None,
+            "sym_m15m":     float(sym_momentum) if sym_momentum is not None else None,
+            "sym_m30m":     float(sym_m30) if sym_m30 is not None else None,
+            "vol_ratio":    float(sym_vol_ratio) if sym_vol_ratio is not None else None,
+            "btc_m15m":     float(btc_regime) if btc_regime is not None else None,
+            "regime_score": int(_scout.score) if "_scout" in locals() and _scout is not None else None,
+            "mtf_aligned":  int(bool(sym_mtf.get("all_tf_aligned"))) if sym_mtf else None,
+        }
+
         if config.DRY_RUN:
             log.warning("[yellow][UPDOWN HOURLY] DRY RUN — simulasi posisi dibuka[/yellow]")
             manager.open_position(
@@ -718,6 +731,7 @@ async def analyze_updown_hourly_market(
                 kelly_fraction  = float(kelly.bet_fraction),
                 strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'contrarian'}_dry_run",
                 token_id        = token_id,
+                **_diag_kwargs,
             )
             log_prediction({
                 "condition_id":   condition_id,
@@ -754,6 +768,7 @@ async def analyze_updown_hourly_market(
                     kelly_fraction  = float(kelly.bet_fraction),
                     strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'contrarian'}",
                     token_id        = token_id,
+                    **_diag_kwargs,
                 )
                 log_prediction({
                     "condition_id":   condition_id,

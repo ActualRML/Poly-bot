@@ -12,7 +12,7 @@ def track_market_price(cid: str, price: float) -> None:
     _market_price_history[cid] = [(p, t) for p, t in hist if t > cutoff]
 
 
-def is_price_stagnant(cid: str, lookback_s: float = 300, threshold_pct: float = 0.005) -> bool:
+def is_price_stagnant(cid: str, lookback_s: float = 300, threshold_pct: float = 0.010) -> bool:
     import time as _t
     hist = _market_price_history.get(cid, [])
     if len(hist) < 3:
