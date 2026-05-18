@@ -121,7 +121,7 @@ async def analyze_updown_hourly_market(
     _use_gbm_now = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
     _t_gate = _classify_t(
         t_min              = _t_min,
-        strategy           = "gbm" if _use_gbm_now else "contrarian",
+        strategy           = "gbm",  # Phase 4.5: momentum-following post-Phase 4; 'gbm' = non-contrarian behavior. Rename deferred Phase 6.
         floor_min          = float(_min_t_min),
         contrarian_min     = getattr(config, "UPDOWN_HOURLY_CONTRARIAN_MIN_T", 20.0),
         tight_max          = getattr(config, "UPDOWN_HOURLY_T_TIER_TIGHT_MAX", 35.0),
@@ -186,21 +186,22 @@ async def analyze_updown_hourly_market(
         if abs(sym_momentum) < regime_thr:
             log.info(
                 f"[UPDOWN HOURLY] {symbol} skip — "
-                f"mom {sym_momentum:+.2%} < thr {regime_thr:.2%} (non-GBM vol-adj)"
+                f"mom {sym_momentum:+.2%} < thr {regime_thr:.2%}"
             )
             return
-        if regime_max > 0 and abs(sym_momentum) > regime_max:
-            log.info(
-                f"[UPDOWN HOURLY] {symbol} skip — "
-                f"mom {sym_momentum:+.2%} > max {regime_max:.1%} (non-GBM, trend too strong)"
-            )
-            return
-        if abs(sym_m30) > regime_max * 1.5:
-            log.info(
-                f"[UPDOWN HOURLY] {symbol} skip — "
-                f"30m mom {sym_m30:+.2%} too strong for contrarian"
-            )
-            return
+        if getattr(config, "FILTER_MOMENTUM_CAP_ENABLED", False):
+            if regime_max > 0 and abs(sym_momentum) > regime_max:
+                log.info(
+                    f"[UPDOWN HOURLY] {symbol} skip — "
+                    f"mom {sym_momentum:+.2%} > max {regime_max:.1%} (trend too strong)"
+                )
+                return
+            if abs(sym_m30) > regime_max * 1.5:
+                log.info(
+                    f"[UPDOWN HOURLY] {symbol} skip — "
+                    f"30m mom {sym_m30:+.2%} too strong for contrarian"
+                )
+                return
 
     min_vol_ratio = config.UPDOWN_HOURLY_MIN_VOL_RATIO
     if sym_vol_ratio < min_vol_ratio:
@@ -331,11 +332,11 @@ async def analyze_updown_hourly_market(
                 return
     else:
         if sym_momentum > 0:
-            buy_outcome = "Down"
-            buy_price   = round(1.0 - market_price_up, 4)
-        else:
-            buy_outcome = "Up"
+            buy_outcome = "Up"     # momentum-following
             buy_price   = market_price_up
+        else:
+            buy_outcome = "Down"   # momentum-following
+            buy_price   = round(1.0 - market_price_up, 4)
 
     _consensus_thr = getattr(config, "UPDOWN_HOURLY_CONSENSUS_FLOOR", 0.90)
     if buy_outcome == "Down" and market_price_up > _consensus_thr:
@@ -565,7 +566,7 @@ async def analyze_updown_hourly_market(
         )
         buy_winrate = max(0.50, min(0.80, _raw_prob))
     else:
-        buy_winrate = 0.52
+        buy_winrate = 0.50
 
     if btc_scalp is not None:
         _scalp_kelly_mult = max(0.5, btc_scalp.get("kelly_multiplier", 1.0))
@@ -667,7 +668,7 @@ async def analyze_updown_hourly_market(
             f"edge={_gbm_decision['edge']:+.3f} min={_adj_min_edge:.1%}"
         )
     else:
-        _mode_label = "[contrarian]"
+        _mode_label = "[momentum]"
     log.info(
         f"[bold cyan][UPDOWN HOURLY][/bold cyan] {symbol} {t_min:.0f}m left | "
         f"BUY {buy_outcome} @ {buy_price:.3f} {_mode_label} | "
@@ -729,7 +730,7 @@ async def analyze_updown_hourly_market(
                 resolve_date    = resolve_date,
                 gap_pct         = _record_gap,
                 kelly_fraction  = float(kelly.bet_fraction),
-                strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'contrarian'}_dry_run",
+                strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'momentum'}_dry_run",
                 token_id        = token_id,
                 **_diag_kwargs,
             )
@@ -766,7 +767,7 @@ async def analyze_updown_hourly_market(
                     resolve_date    = resolve_date,
                     gap_pct         = _record_gap,
                     kelly_fraction  = float(kelly.bet_fraction),
-                    strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'contrarian'}",
+                    strategy_mode   = f"updown_hourly_{'gbm' if use_gbm else 'momentum'}",
                     token_id        = token_id,
                     **_diag_kwargs,
                 )
