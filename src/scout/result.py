@@ -40,5 +40,5 @@ class ScoutDecision:
     def summary(self) -> str:
         return (
             f"enter={self.enter} score={self.score}/{self.max_score} "
-            f"failed=[{'; '.join(self.reasons_failed) or '-'}]"
+            f"failed=({'; '.join(self.reasons_failed) or '-'})"
         )

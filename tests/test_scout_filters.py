@@ -69,6 +69,23 @@ def test_scout_decision_add_tracks_score():
     assert any("b: bad" in r for r in d.reasons_failed)
 
 
+def test_summary_uses_parens_not_brackets():
+    d = ScoutDecision()
+    d.add("x", FilterResult.fail("some reason"))
+    s = d.summary()
+    assert "failed=(x: some reason)" in s
+    assert "[" not in s
+
+
+def test_summary_all_pass_shows_dash():
+    d = ScoutDecision()
+    d.add("x", FilterResult.pass_("ok"))
+    d.enter = True
+    s = d.summary()
+    assert "failed=(-)" in s
+    assert "enter=True" in s
+
+
 def test_already_closed_pass_and_fail():
     ctx = _make_ctx()
     assert AlreadyClosedFilter().evaluate(ctx).passed
