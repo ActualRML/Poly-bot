@@ -26,7 +26,6 @@ from src.risk.slots import (
 )
 from src.risk.blacklist import check_symbol_blacklist, maybe_blacklist_symbol
 from src.scout.scanner import scan_updown_hourly_markets
-from src.scout.updown_scout import score_updown_market, evaluate_updown_scout
 from src.execute.reentry_mgr import (
     reentry_candidates, register_reentry_candidate, cleanup_reentry_candidates,
     scan_reentry_opportunities,
