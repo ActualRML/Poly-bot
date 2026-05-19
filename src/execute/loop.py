@@ -11,7 +11,8 @@ from src.api.gamma_client import GammaClient
 from src.risk.kelly import KellySizer
 from src.execute.exit import ExitEvaluator
 from src.execute.position import PositionManager
-from src.risk.circuit import CircuitBreaker
+# ARCHIVED: CB_ENABLED=false — revive by moving src/_archive/circuit.py back to src/risk/
+from src._archive.circuit import CircuitBreaker
 from src.models.types import SisiOrder
 from src.models.database import log_prediction, get_recent_closed_pnls
 from src.utils.config import config

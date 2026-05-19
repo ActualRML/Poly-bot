@@ -223,7 +223,8 @@ async def analyze_updown_hourly_market(
 
     _gbm_decision: dict | None = None
     if use_gbm:
-        from src.scout.gbm import evaluate_hourly_entry
+        # ARCHIVED: UPDOWN_HOURLY_USE_GBM=false — revive by moving src/_archive/gbm.py back to src/scout/
+        from src._archive.gbm import evaluate_hourly_entry
         vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
         _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
         if _vol_floor > 0:
@@ -517,7 +518,8 @@ async def analyze_updown_hourly_market(
                     return
 
     if locked_outcome is not None:
-        from src.scout.gbm import passes_opposite_reentry_gate
+        # ARCHIVED: UPDOWN_HOURLY_USE_GBM=false — revive by moving src/_archive/gbm.py back to src/scout/
+        from src._archive.gbm import passes_opposite_reentry_gate
         opp_min_min = getattr(config, "UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES", 10)
         allowed, reason = passes_opposite_reentry_gate(
             locked_outcome   = locked_outcome,
