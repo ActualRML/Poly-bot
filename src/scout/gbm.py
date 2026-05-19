@@ -26,7 +26,7 @@ from typing import Optional
 
 import aiohttp
 
-from src.scout.oracle_arb import gbm_prob_above
+from src._archive.oracle_arb import gbm_prob_above
 
 logger = logging.getLogger(__name__)
 

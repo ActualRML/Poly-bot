@@ -8,7 +8,6 @@ from decimal import Decimal
 import aiohttp
 
 from src.api.gamma_client import GammaClient
-from src.scout.mispricing import MispricingDetector, BaseRateBuilder
 from src.risk.kelly import KellySizer
 from src.execute.exit import ExitEvaluator
 from src.execute.position import PositionManager
@@ -44,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 async def run_mispricing_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
-    detector = MispricingDetector(threshold=getattr(config, "HOURLY_MISPRICING_THRESHOLD", 0.12))
     sizer   = KellySizer(
         kelly_multiplier = getattr(config, "KELLY_MULTIPLIER", 0.5),
         max_fraction     = getattr(config, "MAX_KELLY_FRACTION", 0.30),
@@ -75,7 +73,6 @@ async def run_mispricing_mode(clob: ClobClient):
             hourly_lock_t2_min_remaining = getattr(config, "HOURLY_LOCK_T2_MIN_REMAINING", 35.0),
         ),
     )
-    builder = BaseRateBuilder()
     breaker = CircuitBreaker(
         starting_capital       = float(config.SALDO_AWAL),
         max_drawdown_pct       = getattr(config, "MAX_DRAWDOWN_PCT", 0.30),
