@@ -42,7 +42,7 @@ from src.api.clob_client import ClobClient
 logger = logging.getLogger(__name__)
 
 
-async def run_mispricing_mode(clob: ClobClient):
+async def run_hourly_updown_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     sizer   = KellySizer(
         kelly_multiplier = getattr(config, "KELLY_MULTIPLIER", 0.5),

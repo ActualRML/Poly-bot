@@ -5,7 +5,7 @@ import sys
 from src.utils.config import config
 from src.utils.logger import tampilkan_header, log
 from src.api.clob_client import ClobClient
-from src.execute.loop import run_mispricing_mode
+from src.execute.loop import run_hourly_updown_mode
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
         signal.signal(signal.SIGINT, shutdown)
         signal.signal(signal.SIGTERM, shutdown)
 
-        task = asyncio.create_task(run_mispricing_mode(clob))
+        task = asyncio.create_task(run_hourly_updown_mode(clob))
         await stop_event.wait()
         task.cancel()
         try:
