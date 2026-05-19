@@ -20,7 +20,7 @@ CSV_OUT = Path(__file__).parent / "output" / "phase3_thesis_analysis.csv"
 SQL = """
 SELECT id, question, outcome, entry_price, exit_price, pnl_usdc, exit_reason,
        strategy_mode, sym_m15m, sym_m5m, sym_m30m, vol_ratio, btc_m15m,
-       regime_score, mtf_aligned, entry_time, exit_time, kelly_fraction
+       scout_score, mtf_aligned, entry_time, exit_time, kelly_fraction
 FROM positions
 WHERE strategy_mode LIKE 'updown_hourly%'
   AND status='closed'
@@ -195,7 +195,7 @@ def main():
     print("[BY REGIME_SCORE]")
     reg_map = defaultdict(list)
     for r in rows:
-        reg_map[bucket_regime(r["regime_score"])].append(r)
+        reg_map[bucket_regime(r["scout_score"])].append(r)
     for bkt in ["0", "1", "2", "3+", "NULL"]:
         sub = reg_map.get(bkt, [])
         if not sub:
@@ -216,7 +216,7 @@ def main():
     fieldnames = [
         "id", "question", "outcome", "entry_price", "exit_price", "pnl_usdc",
         "exit_reason", "strategy_mode", "sym_m15m", "sym_m5m", "sym_m30m",
-        "vol_ratio", "btc_m15m", "regime_score", "mtf_aligned", "entry_time",
+        "vol_ratio", "btc_m15m", "scout_score", "mtf_aligned", "entry_time",
         "exit_time", "kelly_fraction",
         "symbol", "momentum_sign", "thesis_type", "actual_candle_outcome",
         "hyp_flip_win", "is_win",

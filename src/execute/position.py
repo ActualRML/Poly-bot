@@ -87,7 +87,7 @@ class PositionManager:
         sym_m30m: Optional[float] = None,
         vol_ratio: Optional[float] = None,
         btc_m15m: Optional[float] = None,
-        regime_score: Optional[int] = None,
+        scout_score: Optional[int] = None,
         mtf_aligned: Optional[int] = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
@@ -112,7 +112,7 @@ class PositionManager:
             "sym_m30m":       sym_m30m,
             "vol_ratio":      vol_ratio,
             "btc_m15m":       btc_m15m,
-            "regime_score":   regime_score,
+            "scout_score":   scout_score,
             "mtf_aligned":    mtf_aligned,
         }
 

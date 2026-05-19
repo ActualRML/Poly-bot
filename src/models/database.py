@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS positions (
     sym_m30m        REAL,                   -- symbol's own 30m momentum at entry
     vol_ratio       REAL,                   -- volume ratio recent vs baseline
     btc_m15m        REAL,                   -- BTC 15m momentum at entry (macro regime)
-    regime_score    INTEGER,                -- market regime score
+    scout_score     INTEGER,                -- scout composite sub-score (renamed from regime_score)
     mtf_aligned     INTEGER,                -- 1 if 5m/15m/30m aligned, else 0
     UNIQUE(condition_id, outcome)
 );
@@ -119,9 +119,24 @@ def _migrate(conn):
         "sym_m30m":       "ALTER TABLE positions ADD COLUMN sym_m30m REAL",
         "vol_ratio":      "ALTER TABLE positions ADD COLUMN vol_ratio REAL",
         "btc_m15m":       "ALTER TABLE positions ADD COLUMN btc_m15m REAL",
-        "regime_score":   "ALTER TABLE positions ADD COLUMN regime_score INTEGER",
+        "scout_score":    "ALTER TABLE positions ADD COLUMN scout_score INTEGER",
         "mtf_aligned":    "ALTER TABLE positions ADD COLUMN mtf_aligned INTEGER",
     }
+    if "regime_score" in existing and "scout_score" not in existing:
+        try:
+            sqlite_ver = tuple(int(x) for x in sqlite3.sqlite_version.split("."))
+            if sqlite_ver >= (3, 25, 0):
+                conn.execute("ALTER TABLE positions RENAME COLUMN regime_score TO scout_score")
+                logger.info("[DB MIGRATE] regime_score → scout_score (RENAME COLUMN)")
+            else:
+                conn.execute("ALTER TABLE positions ADD COLUMN scout_score INTEGER")
+                conn.execute("UPDATE positions SET scout_score = regime_score")
+                logger.info("[DB MIGRATE] regime_score → scout_score (ADD+COPY fallback)")
+            existing.add("scout_score")
+            existing.discard("regime_score")
+        except Exception as e:
+            logger.error(f"[DB MIGRATE] regime_score → scout_score rename failed: {e}")
+            raise
     for col, sql in new_columns.items():
         if col not in existing:
             try:
@@ -138,12 +153,12 @@ def save_position(pos: dict) -> int:
             (condition_id, question, outcome, entry_price, current_price,
              highest_price, shares, capital_at_risk, resolve_date, entry_time,
              gap_pct, kelly_fraction, strategy_mode, token_id,
-             sym_m5m, sym_m15m, sym_m30m, vol_ratio, btc_m15m, regime_score, mtf_aligned)
+             sym_m5m, sym_m15m, sym_m30m, vol_ratio, btc_m15m, scout_score, mtf_aligned)
         VALUES
             (:condition_id, :question, :outcome, :entry_price, :current_price,
              :highest_price, :shares, :capital_at_risk, :resolve_date, :entry_time,
              :gap_pct, :kelly_fraction, :strategy_mode, :token_id,
-             :sym_m5m, :sym_m15m, :sym_m30m, :vol_ratio, :btc_m15m, :regime_score, :mtf_aligned)
+             :sym_m5m, :sym_m15m, :sym_m30m, :vol_ratio, :btc_m15m, :scout_score, :mtf_aligned)
         ON CONFLICT(condition_id, outcome) DO UPDATE SET
             status          = 'open',
             question        = excluded.question,
@@ -163,7 +178,7 @@ def save_position(pos: dict) -> int:
             sym_m30m        = excluded.sym_m30m,
             vol_ratio       = excluded.vol_ratio,
             btc_m15m        = excluded.btc_m15m,
-            regime_score    = excluded.regime_score,
+            scout_score    = excluded.scout_score,
             mtf_aligned     = excluded.mtf_aligned,
             exit_price      = NULL,
             exit_time       = NULL,
@@ -186,7 +201,7 @@ def save_position(pos: dict) -> int:
     normalized.setdefault("sym_m30m", None)
     normalized.setdefault("vol_ratio", None)
     normalized.setdefault("btc_m15m", None)
-    normalized.setdefault("regime_score", None)
+    normalized.setdefault("scout_score", None)
     normalized.setdefault("mtf_aligned", None)
 
     with get_conn() as conn:

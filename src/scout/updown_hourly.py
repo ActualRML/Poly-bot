@@ -106,7 +106,7 @@ async def analyze_updown_hourly_market(
             "sym_m30m":     float(sym_m30) if sym_m30 is not None else None,
             "vol_ratio":    float(sym_vol_ratio) if sym_vol_ratio is not None else None,
             "btc_m15m":     float(btc_regime) if btc_regime is not None else None,
-            "regime_score": int(_scout_sub_score) if _scout_sub_score is not None else None,
+            "scout_score": int(_scout_sub_score) if _scout_sub_score is not None else None,
             "mtf_aligned":  int(bool(sym_mtf.get("all_tf_aligned"))) if sym_mtf else None,
         }
 
