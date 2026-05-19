@@ -2,6 +2,25 @@
 
 @STRATEGY_MISTAKES.md
 
+## Workflow Rule: Strategy Changes Must Backtest First
+
+Any change to strategy logic (scout/, risk/sizing, exit thresholds, regime gating, new signals) follows this order:
+
+1. **Backtest first** — via `script/backtest.py` against historical data (≥30 days, or all available history).
+   - Required outputs: WR, profit factor, max drawdown, trade count, per-symbol breakdown.
+   - Pass criteria (configurable, default): WR ≥ 55%, profit factor ≥ 1.3, max DD ≤ 20% of starting capital.
+   - If backtest fails criteria → strategy does NOT go to DRY_RUN. Iterate on backtest until it passes or the hypothesis is abandoned.
+
+2. **DRY_RUN only after backtest pass** — minimum 7 days of paper trading with the new logic before any further change.
+
+3. **Live (when applicable) only after DRY_RUN matches backtest expectations** — paper WR and PF within 20% of backtest values.
+
+Exceptions: config-only changes (thresholds, polling interval, position caps) that don't alter strategy logic can skip backtest IF the change is conservative (tighter risk, not looser). Loosening any risk param → backtest required.
+
+Anti-pattern to avoid: shipping a strategy hypothesis directly to DRY_RUN "to see what happens." DRY_RUN is validation, not exploration. Exploration happens in backtest.
+
+---
+
 ## Agent Debate Protocol
 
 For new features or complex logic, run this internal process **before writing any code**. Skip for simple tasks ("fix typo", "change color").
