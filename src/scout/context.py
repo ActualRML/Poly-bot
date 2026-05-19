@@ -119,6 +119,9 @@ class ScoutContext:
         if delta_sec <= 0:
             return None
 
+        from src.risk.stagnation import track_market_price
+        track_market_price(condition_id, market_price_up)
+
         sym_mtf = (symbol_momentum_map or {}).get(symbol.upper())
         binance_full_pause = False
         if sym_mtf is None:
