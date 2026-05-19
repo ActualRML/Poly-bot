@@ -23,6 +23,7 @@ env/
 # Database & state
 data/*.db
 data/*.db.bak.*
+data/*.db.bak_*
 data/circuit_breaker.json
 data/circuit_breaker.json.bak.*
 data/historical/

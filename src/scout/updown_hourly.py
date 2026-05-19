@@ -94,19 +94,13 @@ async def analyze_updown_hourly_market(
         _record_gap  = abs(btc_regime or 0.0)
         _record_prob = str(round(ctx.buy_winrate, 4))
 
-        _scout_sub_score = None
-        if "scout_composite" in decision.breakdown:
-            _val = decision.breakdown["scout_composite"].value
-            if isinstance(_val, dict):
-                _scout_sub_score = _val.get("score")
-
         _diag_kwargs = {
             "sym_m5m":      float(sym_m5) if sym_m5 is not None else None,
             "sym_m15m":     float(sym_momentum) if sym_momentum is not None else None,
             "sym_m30m":     float(sym_m30) if sym_m30 is not None else None,
             "vol_ratio":    float(sym_vol_ratio) if sym_vol_ratio is not None else None,
             "btc_m15m":     float(btc_regime) if btc_regime is not None else None,
-            "scout_score": int(_scout_sub_score) if _scout_sub_score is not None else None,
+            "scout_score":  None,
             "mtf_aligned":  int(bool(sym_mtf.get("all_tf_aligned"))) if sym_mtf else None,
         }
 
