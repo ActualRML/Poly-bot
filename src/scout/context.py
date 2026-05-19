@@ -53,6 +53,16 @@ class ScoutContext:
     event_horizon: Optional[dict] = None
     market_state: Optional[dict] = None
 
+    sizer: Any = None
+    gamma: Any = None
+    clob: Any = None
+    manager: Any = None
+    breaker: Any = None
+
+    kelly: Any = None
+    scalp_kelly_mult: float = 1.0
+    token_id: str = ""
+
     extras: dict[str, Any] = field(default_factory=dict)
 
     @property

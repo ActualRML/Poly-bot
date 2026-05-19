@@ -23,13 +23,16 @@ def _run_stage(decision: ScoutDecision, ctx: ScoutContext, stage: list[Filter]) 
     return True
 
 
-def evaluate_entry(ctx: ScoutContext) -> ScoutDecision:
+async def evaluate_entry(ctx: ScoutContext) -> ScoutDecision:
     """
     Single gate for entry decisions. Runs all filter stages in order:
     discovery -> precheck -> signal -> risk -> exec.
 
     Short-circuits on first failure. Every filter (pass or fail) is recorded in
     `breakdown` so post-hoc audits can see the reason chain.
+
+    Async to leave room for filters that need I/O (currently all filters are
+    synchronous; signature kept async for forward compatibility).
     """
     decision = ScoutDecision(enter=False)
 

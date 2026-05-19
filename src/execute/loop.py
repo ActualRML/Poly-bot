@@ -703,33 +703,21 @@ async def run_hourly_updown_mode(clob: ClobClient):
                         _market_regime["session"]["session"] if _market_regime else "US_MAIN"
                     )
 
-                    _gbm_active    = getattr(config, "UPDOWN_HOURLY_USE_GBM", True)
-                    _macro_gate_on = getattr(config, "UPDOWN_HOURLY_MACRO_TREND_GATE", True)
-                    _vol_state     = (_market_regime or {}).get("vol_state", "NORMAL")
-                    _flash_crash   = (
-                        _vol_state == "EXTREME_HIGH"
+                    from src.scout.cycle import ScoutCycleGate
+                    _cycle = ScoutCycleGate.evaluate(
+                        market_regime = _market_regime,
+                        breaker       = breaker,
+                        manager       = manager,
+                        btc_vol       = btc_vol,
+                    )
+                    _flash_crash = (
+                        (_market_regime or {}).get("vol_state") == "EXTREME_HIGH"
                         and getattr(config, "FLASH_CRASH_HARD_SKIP", True)
                     )
-                    _regime_skip   = (
-                        _macro_gate_on
-                        and _market_regime
-                        and (
-                            _market_regime.get("skip_contrarian")
-                            or _vol_state == "EXTREME_HIGH"
-                        )
-                        and not _gbm_active
-                    )
-                    if _flash_crash:
+                    if not _cycle.enter_allowed:
                         log.warning(
-                            f"[FLASH CRASH] vol={(_market_regime or {}).get('vol_annual', 0):.0%} annualized "
-                            f"(EXTREME_HIGH) — hard skip ALL entries: "
-                            f"{len(hourly_markets)} hourly + {len(candle_markets)} candle"
-                        )
-                    elif _regime_skip:
-                        log.warning(
-                            f"[MARKET REGIME] {_market_regime['regime']} terdeteksi — "
-                            f"skip {len(hourly_markets)} hourly contrarian entry "
-                            f"(score {_market_regime['trend_score']} vol={_vol_state})"
+                            f"[CYCLE GATE] skip {len(hourly_markets)} hourly + "
+                            f"{len(candle_markets)} candle — {_cycle.reason}"
                         )
                     else:
                         for hm in hourly_markets:
@@ -748,7 +736,7 @@ async def run_hourly_updown_mode(clob: ClobClient):
                             except Exception as e:
                                 logger.warning(f"[UPDOWN HOURLY] Error analyze {hm.get('_symbol', '?')}: {e}")
 
-                    if _flash_crash:
+                    if _flash_crash or not _cycle.enter_allowed:
                         candle_markets = []
                     if config.CANDLE_ENABLED:
                         for cm in candle_markets:
