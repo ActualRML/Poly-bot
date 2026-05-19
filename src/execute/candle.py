@@ -1,3 +1,4 @@
+# DISABLED via CANDLE_ENABLED=false in .env. See STRATEGY_MISTAKES.md.
 from __future__ import annotations
 
 import asyncio

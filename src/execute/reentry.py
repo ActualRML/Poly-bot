@@ -1,3 +1,4 @@
+# DISABLED via REENTRY_AFTER_TP_ENABLED=false in .env. See STRATEGY_MISTAKES.md.
 """
 Re-entry logic untuk hourly contrarian strategy.
 

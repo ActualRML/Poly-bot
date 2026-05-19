@@ -1,3 +1,4 @@
+# DISABLED via REENTRY_AFTER_TP_ENABLED=false in .env. See STRATEGY_MISTAKES.md.
 from __future__ import annotations
 
 import logging
