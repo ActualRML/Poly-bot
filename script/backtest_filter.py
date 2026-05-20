@@ -181,7 +181,7 @@ def main() -> None:
 
     sizer = KellySizer(
         kelly_multiplier=0.5, max_fraction=0.30,
-        min_bet_usdc=5.0, min_winrate=0.52,
+        min_bet_usdc=5.0, min_winrate=0.15,
     )
     manager = PositionManager(
         max_open_positions=5, max_capital_per_market=30.0,

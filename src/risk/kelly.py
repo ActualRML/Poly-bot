@@ -10,8 +10,6 @@ KELLY_MULTIPLIER: Decimal = Decimal("0.7")
 
 MIN_BET_USDC: Decimal = Decimal("5.0")
 
-MIN_WINRATE: Decimal = Decimal("0.52")
-
 @dataclass
 class KellyResult:
     winrate: Decimal
@@ -39,7 +37,10 @@ class KellySizer:
         kelly_multiplier: float = 0.5,
         max_fraction: float = 0.30,
         min_bet_usdc: float = 5.0,
-        min_winrate: float = 0.52,
+        # Default matches config.MIN_WINRATE — reading kelly.py alone
+        # gives the same number as runtime (loop.py builds the sizer
+        # with config.MIN_WINRATE).
+        min_winrate: float = 0.15,
     ):
         self.kelly_multiplier = ke_decimal(kelly_multiplier)
         self.max_fraction = ke_decimal(max_fraction)
