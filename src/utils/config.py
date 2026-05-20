@@ -116,9 +116,23 @@ class Config:
     CANDLE_UPDOWN_MOM_VOL_FACTOR      : float = _get_float("CANDLE_UPDOWN_MOM_VOL_FACTOR", 0.003)
     HOURLY_LOCK_T1_PCT                : float = _get_float("HOURLY_LOCK_T1_PCT", 80.0)
     HOURLY_LOCK_T2_PCT                : float = _get_float("HOURLY_LOCK_T2_PCT", 50.0)
+    HOURLY_LOCK_T1_MIN_REMAINING      : float = _get_float("HOURLY_LOCK_T1_MIN_REMAINING", 20.0)
+    HOURLY_LOCK_T2_MIN_REMAINING      : float = _get_float("HOURLY_LOCK_T2_MIN_REMAINING", 35.0)
     UPDOWN_HOURLY_MACRO_TREND_GATE    : bool  = _get_bool("UPDOWN_HOURLY_MACRO_TREND_GATE", False)
 
     UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT: int   = _get_int("UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", 6)
+
+    UPDOWN_HOURLY_T_TIER_TIGHT_MAX     : float = _get_float("UPDOWN_HOURLY_T_TIER_TIGHT_MAX", 35.0)
+    UPDOWN_HOURLY_T_TIER_CRITICAL_MAX  : float = _get_float("UPDOWN_HOURLY_T_TIER_CRITICAL_MAX", 25.0)
+    UPDOWN_HOURLY_T_EDGE_MULT_TIGHT    : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_TIGHT", 1.5)
+    UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL", 2.0)
+    UPDOWN_HOURLY_CONVICTION_BONUS     : float = _get_float("UPDOWN_HOURLY_CONVICTION_BONUS", 1.5)
+    FLASH_CRASH_HARD_SKIP             : bool  = _get_bool("FLASH_CRASH_HARD_SKIP", True)
+    CANDLE_HOLD_LIMIT_MIN             : float = _get_float("CANDLE_HOLD_LIMIT_MIN", 5.0)
+    CANDLE_HOLD_LIMIT_PNL_PCT         : float = _get_float("CANDLE_HOLD_LIMIT_PNL_PCT", 0.0)
+    CANDLE_ONE_SIDED_HIGH             : float = _get_float("CANDLE_ONE_SIDED_HIGH", 0.82)
+    CANDLE_ONE_SIDED_LOW              : float = _get_float("CANDLE_ONE_SIDED_LOW", 0.18)
+    CANDLE_VELOCITY_THR               : float = _get_float("CANDLE_VELOCITY_THR", 0.05)
 
     RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.25)
     RISK_MIN_SIZE_PCT  : float = _get_float("RISK_MIN_SIZE_PCT", 0.08)
