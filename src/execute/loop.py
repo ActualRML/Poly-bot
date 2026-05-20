@@ -88,7 +88,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
     log.info(
         f"[bold green]Daily Crypto + Up/Down Daily + Up/Down Hourly aktif.[/bold green] "
         f"Threshold: dynamic [6-25%] | "
-        f"Min winrate: {getattr(config, 'HOURLY_MIN_WINRATE_STRICT', 0.75):.0%} | "
         f"Polling: {config.POLLING_INTERVAL}s"
     )
 
@@ -454,14 +453,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
 
                     btc_mtf = symbol_momentum_map.get("BTC", {})
                     btc_regime = btc_mtf.get("m_15m") if btc_mtf else None
-                    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
-                    if btc_regime is not None and regime_thr > 0:
-                        if btc_regime > regime_thr:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BULLISH (momentum: beli Up)")
-                        elif btc_regime < -regime_thr:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BEARISH (momentum: beli Down)")
-                        else:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → NEUTRAL")
 
                     _btc_scalp = None
                     try:
