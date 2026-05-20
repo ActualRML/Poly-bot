@@ -61,16 +61,29 @@ def test_filter_result_helpers():
 
 
 def test_scout_decision_add_tracks_score():
-    d = ScoutDecision()
+    d = ScoutDecision(max_score=2)
     d.add("a", FilterResult.pass_("ok"))
     d.add("b", FilterResult.fail("bad"))
     assert d.score == 1 and d.max_score == 2
     assert d.reasons_passed == ["a"]
     assert any("b: bad" in r for r in d.reasons_failed)
+    assert (len(d.reasons_passed) + len(d.reasons_failed)
+            + len(d.reasons_skipped) == d.max_score)
+
+
+def test_scout_decision_skip_tracks_remaining():
+    d = ScoutDecision(max_score=3)
+    d.add("a", FilterResult.pass_("ok"))
+    d.add("b", FilterResult.fail("bad"))
+    d.skip("c")
+    assert d.score == 1
+    assert d.reasons_skipped == ["c"]
+    assert (len(d.reasons_passed) + len(d.reasons_failed)
+            + len(d.reasons_skipped) == d.max_score)
 
 
 def test_summary_uses_parens_not_brackets():
-    d = ScoutDecision()
+    d = ScoutDecision(max_score=1)
     d.add("x", FilterResult.fail("some reason"))
     s = d.summary()
     assert "failed=(x: some reason)" in s
@@ -78,12 +91,22 @@ def test_summary_uses_parens_not_brackets():
 
 
 def test_summary_all_pass_shows_dash():
-    d = ScoutDecision()
+    d = ScoutDecision(max_score=1)
     d.add("x", FilterResult.pass_("ok"))
     d.enter = True
     s = d.summary()
     assert "failed=(-)" in s
     assert "enter=True" in s
+
+
+def test_summary_shows_skipped_count():
+    d = ScoutDecision(max_score=3)
+    d.add("a", FilterResult.pass_("ok"))
+    d.add("b", FilterResult.fail("bad"))
+    d.skip("c")
+    s = d.summary()
+    assert "score=1/3" in s
+    assert "skipped=1" in s
 
 
 def test_already_closed_pass_and_fail():
@@ -306,3 +329,48 @@ async def test_scout_context_build_handles_bad_dates():
         closed_this_cycle=set(), profit_locked_markets={},
     )
     assert ctx is None
+
+
+@pytest.mark.asyncio
+async def test_evaluate_entry_skips_remaining_on_short_circuit():
+    from src.scout.scout import evaluate_entry
+    from src.scout.filters.discovery import DISCOVERY_FILTERS
+    from src.scout.filters.precheck import PRECHECK_FILTERS
+    from src.scout.filters.signal import SIGNAL_FILTERS
+    from src.scout.filters.risk import RISK_FILTERS
+    from src.scout.filters.exec import EXEC_FILTERS
+
+    total = (len(DISCOVERY_FILTERS) + len(PRECHECK_FILTERS)
+             + len(SIGNAL_FILTERS) + len(RISK_FILTERS) + len(EXEC_FILTERS))
+
+    ctx = _make_ctx(delta_sec=5 * 60)
+    decision = await evaluate_entry(ctx)
+
+    assert not decision.enter
+    assert decision.max_score == total
+    assert (len(decision.reasons_passed) + len(decision.reasons_failed)
+            + len(decision.reasons_skipped) == total)
+    failed_names = [r.split(":", 1)[0] for r in decision.reasons_failed]
+    assert "min_time_floor" in failed_names
+    assert "min_momentum" in decision.reasons_skipped
+    assert "sizing" in decision.reasons_skipped
+    assert "can_open" in decision.reasons_skipped
+
+
+@pytest.mark.asyncio
+async def test_evaluate_entry_max_score_equals_total_pipeline():
+    from src.scout.scout import evaluate_entry
+    from src.scout.filters.discovery import DISCOVERY_FILTERS
+    from src.scout.filters.precheck import PRECHECK_FILTERS
+    from src.scout.filters.signal import SIGNAL_FILTERS
+    from src.scout.filters.risk import RISK_FILTERS
+    from src.scout.filters.exec import EXEC_FILTERS
+
+    total = (len(DISCOVERY_FILTERS) + len(PRECHECK_FILTERS)
+             + len(SIGNAL_FILTERS) + len(RISK_FILTERS) + len(EXEC_FILTERS))
+
+    ctx_a = _make_ctx(delta_sec=5 * 60)
+    ctx_b = _make_ctx(closed_this_cycle={"0xabc"})
+    d_a = await evaluate_entry(ctx_a)
+    d_b = await evaluate_entry(ctx_b)
+    assert d_a.max_score == total == d_b.max_score

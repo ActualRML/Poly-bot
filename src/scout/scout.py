@@ -23,29 +23,47 @@ def _run_stage(decision: ScoutDecision, ctx: ScoutContext, stage: list[Filter]) 
     return True
 
 
+def _mark_skipped(
+    decision: ScoutDecision,
+    stages: list[list[Filter]],
+    from_stage_idx: int,
+) -> None:
+    """Tally every filter that didn't evaluate due to short-circuit."""
+    for f in stages[from_stage_idx]:
+        if f.name not in decision.breakdown:
+            decision.skip(f.name)
+    for later in stages[from_stage_idx + 1:]:
+        for f in later:
+            decision.skip(f.name)
+
+
 async def evaluate_entry(ctx: ScoutContext) -> ScoutDecision:
     """
     Single gate for entry decisions. Runs all filter stages in order:
     discovery -> precheck -> signal -> risk -> exec.
 
-    Short-circuits on first failure. Every filter (pass or fail) is recorded in
-    `breakdown` so post-hoc audits can see the reason chain.
+    Short-circuits on first failure. Evaluated filters (pass or fail) are recorded in
+    `breakdown`; remaining filters in unreached stages are tallied in `reasons_skipped`.
+    max_score reflects the total filter count across the full pipeline (fixed across
+    markets), preserving the invariant passed + failed + skipped == max_score.
 
     Async to leave room for filters that need I/O (currently all filters are
     synchronous; signature kept async for forward compatibility).
     """
-    decision = ScoutDecision(enter=False)
+    stages: list[list[Filter]] = [
+        DISCOVERY_FILTERS,
+        PRECHECK_FILTERS,
+        SIGNAL_FILTERS,
+        RISK_FILTERS,
+        EXEC_FILTERS,
+    ]
+    total = sum(len(s) for s in stages)
+    decision = ScoutDecision(enter=False, max_score=total)
 
-    if not _run_stage(decision, ctx, DISCOVERY_FILTERS):
-        return decision
-    if not _run_stage(decision, ctx, PRECHECK_FILTERS):
-        return decision
-    if not _run_stage(decision, ctx, SIGNAL_FILTERS):
-        return decision
-    if not _run_stage(decision, ctx, RISK_FILTERS):
-        return decision
-    if not _run_stage(decision, ctx, EXEC_FILTERS):
-        return decision
+    for i, stage in enumerate(stages):
+        if not _run_stage(decision, ctx, stage):
+            _mark_skipped(decision, stages, i)
+            return decision
 
     decision.enter = True
     return decision
