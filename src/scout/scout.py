@@ -67,3 +67,28 @@ async def evaluate_entry(ctx: ScoutContext) -> ScoutDecision:
 
     decision.enter = True
     return decision
+
+
+def evaluate_entry_full(ctx: ScoutContext) -> ScoutDecision:
+    """
+    Diagnostic variant of evaluate_entry: runs EVERY filter with no
+    short-circuit, so `breakdown` is populated for the full pipeline on every
+    market. Used only by script/backtest_filter.py to measure per-filter
+    behavior on historical trades. NOT on the production entry path.
+
+    enter is True only when every filter passed.
+    """
+    stages: list[list[Filter]] = [
+        DISCOVERY_FILTERS,
+        PRECHECK_FILTERS,
+        SIGNAL_FILTERS,
+        RISK_FILTERS,
+        EXEC_FILTERS,
+    ]
+    total = sum(len(s) for s in stages)
+    decision = ScoutDecision(enter=False, max_score=total)
+    for stage in stages:
+        for f in stage:
+            decision.add(f.name, f.evaluate(ctx))
+    decision.enter = (decision.score == total)
+    return decision
