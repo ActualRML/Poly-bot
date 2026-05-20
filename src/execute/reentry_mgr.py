@@ -13,7 +13,7 @@ reentry_candidates: dict[str, dict] = {}
 
 def register_reentry_candidate(decision, pos_row: dict | None = None) -> None:
     pos = decision.position
-    if pos.strategy_mode not in ("updown_hourly", "updown_hourly_dry_run"):
+    if not (pos.strategy_mode and pos.strategy_mode.startswith("updown_hourly")):
         return
     cid = pos.condition_id
     symbol = detect_symbol_from_question(pos.question)

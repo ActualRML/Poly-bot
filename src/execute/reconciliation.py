@@ -180,7 +180,7 @@ async def resolve_checker(
         manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, reason)
         breaker.record_trade(float(pnl))
         if (
-            pos.get("strategy_mode") in ("updown_hourly", "updown_hourly_dry_run")
+            (pos.get("strategy_mode") or "").startswith("updown_hourly")
             and float(pnl) < 0
         ):
             _sym = detect_symbol_from_question(pos.get("question", ""))

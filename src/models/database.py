@@ -413,7 +413,7 @@ def get_recent_closed_hourly(limit: int = 10) -> list[dict]:
         rows = conn.execute(
             """SELECT question, pnl_usdc FROM positions
                WHERE status = 'closed' AND pnl_usdc IS NOT NULL
-                 AND strategy_mode IN ('updown_hourly', 'updown_hourly_dry_run')
+                 AND strategy_mode LIKE 'updown_hourly%'
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()

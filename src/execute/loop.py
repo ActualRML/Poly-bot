@@ -205,7 +205,8 @@ async def run_hourly_updown_mode(clob: ClobClient):
                             logger.warning(f"[BREAKER] record_trade error: {_e}")
 
                         if (
-                            _d.position.strategy_mode in ("updown_hourly", "updown_hourly_dry_run")
+                            _d.position.strategy_mode
+                            and _d.position.strategy_mode.startswith("updown_hourly")
                             and float(_d.estimated_pnl_usdc or 0) < 0
                         ):
                             _sym = detect_symbol_from_question(_d.position.question)
@@ -223,8 +224,9 @@ async def run_hourly_updown_mode(clob: ClobClient):
                                 f"{_d.position.outcome} SL'd — queued for reverse re-entry"
                             )
 
-                        if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
-                            "updown_hourly", "updown_hourly_dry_run"
+                        if _d.signal == _XS.EXIT_LOCK_PROFIT and (
+                            _d.position.strategy_mode
+                            and _d.position.strategy_mode.startswith("updown_hourly")
                         ):
                             if config.REENTRY_AFTER_TP_ENABLED:
                                 register_reentry_candidate(_d)
@@ -270,9 +272,7 @@ async def run_hourly_updown_mode(clob: ClobClient):
                         _fp_max_ent  = config.HOURLY_FLIP_MAX_ENTRY
 
                         for _fp in _fp_get_open():
-                            if _fp.get("strategy_mode") not in (
-                                "updown_hourly", "updown_hourly_dry_run"
-                            ):
+                            if not (_fp.get("strategy_mode") or "").startswith("updown_hourly"):
                                 continue
                             _fp_cid = _fp["condition_id"]
                             if _fp_cid in _hourly_flip_queue:
