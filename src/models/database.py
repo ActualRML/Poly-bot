@@ -350,7 +350,9 @@ def get_stats() -> dict:
                 SUM(CASE WHEN CAST(usdc_amount AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN CAST(usdc_amount AS REAL) <= 0 THEN 1 ELSE 0 END) AS losses,
                 AVG(CAST(usdc_amount AS REAL))                  AS avg_pnl
-            FROM trades WHERE action IN ('exit', 'sell')
+            FROM trades
+            WHERE action IN ('exit', 'sell')
+              AND (notes IS NULL OR notes != 'force_close_no_price')
         """).fetchone()
         d = dict(row)
         total = d["total_trades"] or 0
