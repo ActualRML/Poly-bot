@@ -42,7 +42,7 @@ class _StubGamma:
 # the reader knows which filter results may be biased by reconstruction.
 DEFAULTED_FIELDS = [
     "vol_annual = 0.40 (no per-symbol realized vol stored) -> biases MinMomentum threshold",
-    "buy_winrate = 0.55 (momentum-mode fallback; not stored) -> biases SizingFilter EV",
+    "buy_winrate = 0.33 (momentum-mode fallback; not stored) -> biases SizingFilter EV",
     "market_regime = None (cross-asset regime not stored) -> SizingFilter vol-scale skipped",
     "btc_scalp = None (scalp signal not stored) -> SizingFilter scalp mult = 1.0",
     "market_session = US_MAIN (session not stored) -> SizingFilter session cap",
@@ -142,7 +142,7 @@ def reconstruct_ctx(row: dict, sizer: KellySizer, manager: PositionManager) -> S
         slot_history_count    = 0,
         session         = None,
         capital         = 120.0,
-        buy_winrate     = 0.55,
+        buy_winrate     = 0.33,
     )
     ctx.sizer   = sizer
     ctx.gamma   = _StubGamma()

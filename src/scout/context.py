@@ -47,7 +47,10 @@ class ScoutContext:
 
     buy_outcome: str = ""
     buy_price: float = 0.0
-    buy_winrate: float = 0.5
+    # Hardcoded base rate from historical WR (10W/20L = 33%). Placeholder
+    # until a signal-based winrate model is implemented. Update manually
+    # every ~50-100 trades, or replace with a rolling DB lookup.
+    buy_winrate: float = 0.33
     locked_outcome: Optional[str] = None
 
     event_horizon: Optional[dict] = None
