@@ -75,6 +75,7 @@ async def analyze_updown_hourly_market(
         max_entries    = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", HOURLY_MAX_ENTRIES_PER_SLOT)
         slot_history   = ctx.slot_history_count
         t_min          = ctx.t_min
+        wr_score       = ctx.extras.get("winrate_breakdown", {}).get("score", 0)
 
         log.info(
             f"[bold cyan][UPDOWN HOURLY][/bold cyan] {symbol} {t_min:.0f}m left | "
@@ -82,7 +83,7 @@ async def analyze_updown_hourly_market(
             f"sym 5m/15m/30m {sym_m5:+.2%}/{sym_momentum:+.2%}/{sym_m30:+.2%} "
             f"vol×{sym_vol_ratio:.2f} | "
             f"scalp={btc_scalp.get('action', '-') if btc_scalp else '-'} "
-            f"wr={ctx.buy_winrate:.2f} km={ctx.scalp_kelly_mult} | "
+            f"wr={ctx.buy_winrate:.2f} score={wr_score}/6 km={ctx.scalp_kelly_mult} | "
             f"slot {slot_history+1}/{max_entries} | Kelly ${float(kelly.bet_usdc):.2f}"
         )
 

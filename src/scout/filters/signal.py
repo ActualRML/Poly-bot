@@ -85,6 +85,7 @@ class DirectionalDecisionFilter(Filter):
     name = "directional_decision"
 
     def evaluate(self, ctx: ScoutContext) -> FilterResult:
+        from src.scout.probability import calculate_winrate
         if ctx.sym_mtf is None:
             return FilterResult.fail("no momentum data for direction")
         sym_15m = ctx.sym_mtf["m_15m"]
@@ -94,9 +95,25 @@ class DirectionalDecisionFilter(Filter):
         else:
             ctx.buy_outcome = "Down"
             ctx.buy_price = round(1.0 - ctx.market_price_up, 4)
+
+        btc_m15m = ctx.btc_mtf.get("m_15m") if ctx.btc_mtf else None
+        winrate, breakdown = calculate_winrate(
+            symbol      = ctx.symbol,
+            buy_outcome = ctx.buy_outcome,
+            sym_mtf     = ctx.sym_mtf,
+            vol_annual  = ctx.vol_annual,
+            t_min       = ctx.t_min,
+            btc_m15m    = btc_m15m,
+        )
+        ctx.buy_winrate = winrate
+        ctx.extras["winrate_breakdown"] = breakdown
+
         return FilterResult.pass_(
-            reason=f"BUY {ctx.buy_outcome} @ {ctx.buy_price:.3f} (mom {sym_15m:+.2%})",
-            value={"outcome": ctx.buy_outcome, "price": ctx.buy_price},
+            reason=(
+                f"BUY {ctx.buy_outcome} @ {ctx.buy_price:.3f} (mom {sym_15m:+.2%}) "
+                f"wr={winrate:.2f} score={breakdown.get('score', 0)}/6"
+            ),
+            value={"outcome": ctx.buy_outcome, "price": ctx.buy_price, "winrate": winrate},
         )
 
 
