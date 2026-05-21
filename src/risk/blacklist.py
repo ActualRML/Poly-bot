@@ -38,6 +38,8 @@ def maybe_blacklist_symbol(symbol: str) -> None:
                 f"[BLACKLIST] {symbol} di-blacklist {_SYMBOL_BLACKLIST_HOURS}h "
                 f"setelah {_SYMBOL_LOSS_STREAK_THRESHOLD} loss berturut-turut"
             )
-    except Exception as _e:
+    except Exception as e:
         import logging
-        logging.getLogger(__name__).debug(f"[BLACKLIST] Check error for {symbol}: {_e}")
+        logging.getLogger(__name__).warning(
+            f"[BLACKLIST] {symbol} guard failed: {e}", exc_info=True
+        )
