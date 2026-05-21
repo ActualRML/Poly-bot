@@ -117,6 +117,54 @@ class DirectionalDecisionFilter(Filter):
         )
 
 
+class DogeMultiTfConfirmFilter(Filter):
+    """
+    DOGE-only: require m5m and m30m to confirm the bet direction with
+    minimum magnitude. Blocks "lone 15m spike" entries that historically
+    led to catastrophic losses for DOGE (3/8 win rate, -$39 PnL).
+
+    Threshold: 0.08% (0.0008 decimal) on both m5m and m30m.
+
+    Validation data (35 trades sample): DOGE-only application blocks 3
+    losers, 0 winners, +$50.39 net. Global application was net-negative.
+    """
+
+    name = "doge_multitf_confirm"
+
+    THRESHOLD = 0.0008  # 0.08% magnitude floor
+
+    def evaluate(self, ctx: ScoutContext) -> FilterResult:
+        if ctx.symbol.upper() != "DOGE":
+            return FilterResult.pass_(reason="not_doge_skip")
+
+        if ctx.sym_mtf is None:
+            return FilterResult.fail(reason="no_mtf_data")
+
+        m5m = ctx.sym_mtf.get("m_5m", 0.0)
+        m30m = ctx.sym_mtf.get("m_30m", 0.0)
+        is_up = ctx.buy_outcome == "Up"
+
+        m5m_aligned = (m5m > 0) == is_up
+        m5m_strong = abs(m5m) >= self.THRESHOLD
+
+        m30m_aligned = (m30m > 0) == is_up
+        m30m_strong = abs(m30m) >= self.THRESHOLD
+
+        if not (m5m_aligned and m5m_strong):
+            return FilterResult.fail(
+                reason=f"doge m5m weak/opposed: {m5m*100:+.3f}% vs threshold ±{self.THRESHOLD*100:.2f}%"
+            )
+
+        if not (m30m_aligned and m30m_strong):
+            return FilterResult.fail(
+                reason=f"doge m30m weak/opposed: {m30m*100:+.3f}% vs threshold ±{self.THRESHOLD*100:.2f}%"
+            )
+
+        return FilterResult.pass_(
+            reason=f"doge multi-tf confirmed: m5m {m5m*100:+.3f}% m30m {m30m*100:+.3f}%"
+        )
+
+
 class ConsensusFloorFilter(Filter):
     """Skip when market is at one-sided consensus already."""
 
@@ -218,6 +266,7 @@ SIGNAL_FILTERS: list[Filter] = [
     VolumeRatioFilter(),
     PriceStagnationFilter(),
     DirectionalDecisionFilter(),
+    DogeMultiTfConfirmFilter(),
     ConsensusFloorFilter(),
     MarketStateFilter(),
     BtcCorrelationFilter(),
