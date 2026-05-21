@@ -37,7 +37,7 @@ class Config:
     GAMMA_HOST : str = _get("GAMMA_HOST", "https://gamma-api.polymarket.com")
 
     KELLY_MULTIPLIER       : float = _get_float("KELLY_MULTIPLIER", 0.7)
-    MAX_KELLY_FRACTION     : float = _get_float("MAX_KELLY_FRACTION", 0.30)
+    MAX_KELLY_FRACTION     : float = _get_float("MAX_KELLY_FRACTION", 0.25)
     MIN_BET_USDC           : float = _get_float("MIN_BET_USDC", 5.0)
     MIN_WINRATE            : float = _get_float("MIN_WINRATE", 0.15)
     MAX_OPEN_POSITIONS     : int   = _get_int("MAX_OPEN_POSITIONS", 10)
@@ -117,12 +117,12 @@ class Config:
     CANDLE_ONE_SIDED_LOW              : float = _get_float("CANDLE_ONE_SIDED_LOW", 0.18)
     CANDLE_VELOCITY_THR               : float = _get_float("CANDLE_VELOCITY_THR", 0.05)
 
-    RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.25)
+    RISK_BASE_SIZE_PCT : float = _get_float("RISK_BASE_SIZE_PCT", 0.15)
     RISK_MIN_SIZE_PCT  : float = _get_float("RISK_MIN_SIZE_PCT", 0.08)
     RISK_MAX_SIZE_PCT  : float = _get_float("RISK_MAX_SIZE_PCT", 0.40)
 
     CB_ENABLED       : bool    = _get_bool("CB_ENABLED", False)
-    SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "1000")
+    SALDO_AWAL       : Decimal = _get_decimal("SALDO_AWAL", "120")
     POLLING_INTERVAL : int     = _get_int("POLLING_INTERVAL_DETIK", 5)
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
     DRY_RUN          : bool    = _get_bool("DRY_RUN", True)
