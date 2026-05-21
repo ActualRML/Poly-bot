@@ -16,11 +16,26 @@ _SYMBOL_VOL: dict[str, float] = {
 }
 _VOL_BTC_BASELINE = 0.44
 
+_ASSET_NAME_TO_SYMBOL: dict[str, str] = {
+    "BTC": "BTC", "BITCOIN": "BTC",
+    "ETH": "ETH", "ETHEREUM": "ETH",
+    "SOL": "SOL", "SOLANA": "SOL",
+    "BNB": "BNB",
+    "XRP": "XRP", "RIPPLE": "XRP",
+    "DOGE": "DOGE", "DOGECOIN": "DOGE",
+}
+
 def _vol_scale_from_question(question: str) -> float:
-    m = _re.search(r'\b(BTC|ETH|SOL|BNB|XRP|DOGE)\b', question.upper())
+    m = _re.search(
+        r'\b(BTC|ETH|SOL|BNB|XRP|DOGE|BITCOIN|ETHEREUM|SOLANA|DOGECOIN|RIPPLE)\b',
+        question.upper(),
+    )
     if not m:
         return 1.0
-    vol = _SYMBOL_VOL.get(m.group(1), _VOL_BTC_BASELINE)
+    symbol = _ASSET_NAME_TO_SYMBOL.get(m.group(1))
+    if not symbol:
+        return 1.0
+    vol = _SYMBOL_VOL.get(symbol, _VOL_BTC_BASELINE)
     return _math.sqrt(vol / _VOL_BTC_BASELINE)
 
 class ExitSignal(Enum):
