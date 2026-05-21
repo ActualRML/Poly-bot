@@ -401,6 +401,7 @@ def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
         rows = conn.execute(
             """SELECT pnl_usdc FROM positions
                WHERE status = 'closed' AND pnl_usdc IS NOT NULL
+                 AND (exit_reason IS NULL OR exit_reason != 'force_close_no_price')
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()
@@ -416,6 +417,7 @@ def get_recent_closed_hourly(limit: int = 10) -> list[dict]:
             """SELECT question, pnl_usdc FROM positions
                WHERE status = 'closed' AND pnl_usdc IS NOT NULL
                  AND strategy_mode LIKE 'updown_hourly%'
+                 AND (exit_reason IS NULL OR exit_reason != 'force_close_no_price')
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()
