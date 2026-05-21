@@ -101,4 +101,9 @@ async def build_vol_data(session: aiohttp.ClientSession, hours: int | None = Non
     for symbol, result in zip(symbols, results):
         if isinstance(result, float) and result > 0:
             vol_data[symbol] = result
+        else:
+            logger.warning(
+                f"[VOL] {symbol} realized vol fetch failed ({result!r}), "
+                f"caller will fall back to DEFAULT 0.40"
+            )
     return vol_data

@@ -143,7 +143,10 @@ class ScoutContext:
             except Exception:
                 binance_full_pause = False
 
-        vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
+        vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT")
+        if vol_annual is None:
+            logger.warning(f"[VOL] {symbol} vol fetch failed, using fallback 0.40")
+            vol_annual = 0.40
 
         btc_mtf = (symbol_momentum_map or {}).get("BTC")
 

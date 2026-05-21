@@ -238,7 +238,10 @@ async def analyze_candle_market(
     momentum_15m = (closes_1m[-1] - closes_1m[0]) / closes_1m[0]
 
     _base_threshold = getattr(config, "CANDLE_UPDOWN_MOM_THRESHOLD", 0.0015)
-    _vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT") or 0.40
+    _vol_annual = (vol_data or {}).get(symbol.upper()) or (vol_data or {}).get("DEFAULT")
+    if _vol_annual is None:
+        logger.warning(f"[VOL] {symbol} vol fetch failed, using fallback 0.40")
+        _vol_annual = 0.40
     _vol_floor = getattr(config, "UPDOWN_VOL_FLOOR", 0.0)
     if _vol_floor > 0:
         _vol_annual = max(_vol_annual, _vol_floor)
