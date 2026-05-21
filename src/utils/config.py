@@ -110,7 +110,6 @@ class Config:
     UPDOWN_HOURLY_T_TIER_CRITICAL_MAX  : float = _get_float("UPDOWN_HOURLY_T_TIER_CRITICAL_MAX", 25.0)
     UPDOWN_HOURLY_T_EDGE_MULT_TIGHT    : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_TIGHT", 1.5)
     UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL", 2.0)
-    UPDOWN_HOURLY_CONVICTION_BONUS     : float = _get_float("UPDOWN_HOURLY_CONVICTION_BONUS", 1.5)
     FLASH_CRASH_HARD_SKIP             : bool  = _get_bool("FLASH_CRASH_HARD_SKIP", True)
     CANDLE_HOLD_LIMIT_MIN             : float = _get_float("CANDLE_HOLD_LIMIT_MIN", 5.0)
     CANDLE_HOLD_LIMIT_PNL_PCT         : float = _get_float("CANDLE_HOLD_LIMIT_PNL_PCT", 0.0)
