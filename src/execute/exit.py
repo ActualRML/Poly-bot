@@ -116,10 +116,6 @@ class ExitEvaluator:
         profit_lock_high_pct: float = 35.0,
         updown_profit_lock_pct: float = 40.0,
         updown_profit_lock_high_pct: float = 60.0,
-        hourly_profit_lock_pct: float = 30.0,
-        hourly_profit_lock_high_pct: float = 50.0,
-        hourly_trailing_activate_pct: float = 15.0,
-        hourly_trailing_retrace_pct: float = 0.30,
         # Tiered late-stage stop-loss with exclusive bands.
         # Filosofi: makin DEKAT resolve = makin LENIENT (threshold makin besar)
         # karena slippage extreme + result udah ditentukan.
@@ -153,10 +149,6 @@ class ExitEvaluator:
         self.profit_lock_high_pct = profit_lock_high_pct
         self.updown_profit_lock_pct = updown_profit_lock_pct
         self.updown_profit_lock_high_pct = updown_profit_lock_high_pct
-        self.hourly_profit_lock_pct = hourly_profit_lock_pct
-        self.hourly_profit_lock_high_pct = hourly_profit_lock_high_pct
-        self.hourly_trailing_activate_pct = hourly_trailing_activate_pct
-        self.hourly_trailing_retrace_pct = hourly_trailing_retrace_pct
         self.hourly_late_sl_t1_pct = hourly_late_sl_t1_pct
         self.hourly_late_sl_t1_max_remaining = hourly_late_sl_t1_max_remaining
         self.hourly_late_sl_t2_pct = hourly_late_sl_t2_pct

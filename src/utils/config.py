@@ -50,8 +50,6 @@ class Config:
     PROFIT_LOCK_HIGH_PCT         : float = _get_float("PROFIT_LOCK_HIGH_PCT", 35.0)
     UPDOWN_PROFIT_LOCK_PCT       : float = _get_float("UPDOWN_PROFIT_LOCK_PCT", 40.0)
     UPDOWN_PROFIT_LOCK_HIGH_PCT  : float = _get_float("UPDOWN_PROFIT_LOCK_HIGH_PCT", 60.0)
-    HOURLY_PROFIT_LOCK_PCT       : float = _get_float("HOURLY_PROFIT_LOCK_PCT", 30.0)
-    HOURLY_PROFIT_LOCK_HIGH_PCT  : float = _get_float("HOURLY_PROFIT_LOCK_HIGH_PCT", 50.0)
 
     HOURLY_SL_MIN_AGE_MINUTES          : float = _get_float("HOURLY_SL_MIN_AGE_MINUTES", 10.0)
     HOURLY_LATE_SL_T4_PCT              : float = _get_float("HOURLY_LATE_SL_T4_PCT", -45.0)
@@ -85,8 +83,6 @@ class Config:
     UPDOWN_HOURLY_SKIP_SYMBOLS        : str   = _get("UPDOWN_HOURLY_SKIP_SYMBOLS", "")
     UPDOWN_HOURLY_ASIA_KELLY_CAP      : float = _get_float("UPDOWN_HOURLY_ASIA_KELLY_CAP", 1.0)
     UPDOWN_HOURLY_US_MAIN_KELLY_CAP   : float = _get_float("UPDOWN_HOURLY_US_MAIN_KELLY_CAP", 0.7)
-    HOURLY_TRAILING_ACTIVATE_PCT      : float = _get_float("HOURLY_TRAILING_ACTIVATE_PCT", 15.0)
-    HOURLY_TRAILING_RETRACE_PCT       : float = _get_float("HOURLY_TRAILING_RETRACE_PCT", 0.30)
     CANDLE_ENABLED                    : bool  = _get_bool("CANDLE_ENABLED", False)
     HOURLY_FLIP_ENABLED               : bool  = _get_bool("HOURLY_FLIP_ENABLED", False)
     REENTRY_AFTER_TP_ENABLED          : bool  = _get_bool("REENTRY_AFTER_TP_ENABLED", False)
