@@ -66,15 +66,22 @@ class SizingFilter(Filter):
         max_size = calculate_position_size(
             get_recent_closed_pnls(limit=5), capital=float(ctx.capital)
         )
+        cap_dec = Decimal(str(float(ctx.capital)))
         if float(kelly.bet_usdc) > max_size:
             capped_usdc   = Decimal(str(max_size))
             capped_shares = (capped_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
+            capped_frac   = (capped_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
+            kelly = _dc_replace(
+                kelly, bet_usdc=capped_usdc, shares=capped_shares, bet_fraction=capped_frac
+            )
 
         if scalp_mult < 1.0:
             scaled_usdc   = Decimal(str(round(float(kelly.bet_usdc) * scalp_mult, 2)))
             scaled_shares = (scaled_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            kelly = _dc_replace(kelly, bet_usdc=scaled_usdc, shares=scaled_shares)
+            scaled_frac   = (scaled_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
+            kelly = _dc_replace(
+                kelly, bet_usdc=scaled_usdc, shares=scaled_shares, bet_fraction=scaled_frac
+            )
             if float(kelly.bet_usdc) <= 0:
                 return FilterResult.fail("bet → 0 after vol/session scaling")
 
