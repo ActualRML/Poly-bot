@@ -100,6 +100,15 @@ def main():
             print(f"      Outcome  : {pos['outcome']} | {_gap_label}: {gap_pct:.1f}%")
             print(f"      Entry    : {entry:.3f} | Current: {current:.3f} | "
                   f"PnL: ${pnl_pos:+.2f} ({pnl_pct:+.1f}%)")
+            _ss = pos.get("scout_score")
+            _pp = pos.get("predicted_prob")
+            if _ss is not None or _pp is not None:
+                _sig = []
+                if _ss is not None:
+                    _sig.append(f"score {_ss}")
+                if _pp is not None:
+                    _sig.append(f"wr {float(_pp):.2f}")
+                print(f"      Signal   : {' | '.join(_sig)}")
             print(f"      Capital  : ${capital:.2f} | "
                   f"Win → +${profit_if_win:.2f} | "
                   f"Lose → -${capital:.2f} | "
