@@ -4,12 +4,6 @@ from typing import Optional
 
 from src.risk.pricing import ke_decimal, hitung_midpoint, validasi_harga
 
-MAX_KELLY_FRACTION: Decimal = Decimal("0.30")
-
-KELLY_MULTIPLIER: Decimal = Decimal("0.7")
-
-MIN_BET_USDC: Decimal = Decimal("5.0")
-
 @dataclass
 class KellyResult:
     winrate: Decimal
