@@ -89,6 +89,8 @@ class PositionManager:
         btc_m15m: Optional[float] = None,
         scout_score: Optional[int] = None,
         mtf_aligned: Optional[int] = None,
+        predicted_prob: Optional[float] = None,
+        signal_breakdown: Optional[str] = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
 
@@ -114,6 +116,8 @@ class PositionManager:
             "btc_m15m":       btc_m15m,
             "scout_score":   scout_score,
             "mtf_aligned":    mtf_aligned,
+            "predicted_prob": predicted_prob,
+            "signal_breakdown": signal_breakdown,
         }
 
         try:

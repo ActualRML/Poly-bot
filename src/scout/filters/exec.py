@@ -12,7 +12,7 @@ class SizingFilter(Filter):
     """
     Compute Kelly bet for ctx.buy_outcome / buy_price / buy_winrate.
     Apply scalp kelly multiplier, momentum alignment, session cap, vol-state
-    scale, conviction bonus, then position-size cap. Stores final result on
+    scale, then position-size cap. Stores final result on
     ctx.kelly and ctx.scalp_kelly_mult.
     Fails if Kelly is not positive-EV or final bet ≤ 0.
     """
@@ -41,17 +41,11 @@ class SizingFilter(Filter):
 
         sym_mtf = ctx.sym_mtf or {}
         sym_15m = sym_mtf.get("m_15m", 0.0) or 0.0
-        mom_aligned = (
-            (ctx.buy_outcome == "Up" and sym_15m > 0.0005) or
-            (ctx.buy_outcome == "Down" and sym_15m < -0.0005)
-        )
         mom_opposed = (
             (ctx.buy_outcome == "Up" and sym_15m < -0.0005) or
             (ctx.buy_outcome == "Down" and sym_15m > 0.0005)
         )
-        if mom_aligned:
-            scalp_mult = min(scalp_mult * 1.2, 1.5)
-        elif mom_opposed:
+        if mom_opposed:
             scalp_mult = scalp_mult * 0.75
 
         session_cap = {
@@ -69,27 +63,25 @@ class SizingFilter(Filter):
             if vol_km < 1.0:
                 scalp_mult = min(scalp_mult, vol_km)
 
-        conv_bonus = getattr(config, "UPDOWN_HOURLY_CONVICTION_BONUS", 1.5)
-        t_gate = ctx.event_horizon or {}
-        if (
-            t_gate.get("tier") == "WIDE"
-            and (ctx.market_regime or {}).get("vol_state") in ("NORMAL", "LOW", "EXTREME_LOW")
-            and conv_bonus > 1.0
-        ):
-            scalp_mult = scalp_mult * conv_bonus
-
         max_size = calculate_position_size(
             get_recent_closed_pnls(limit=5), capital=float(ctx.capital)
         )
+        cap_dec = Decimal(str(float(ctx.capital)))
         if float(kelly.bet_usdc) > max_size:
             capped_usdc   = Decimal(str(max_size))
             capped_shares = (capped_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            kelly = _dc_replace(kelly, bet_usdc=capped_usdc, shares=capped_shares)
+            capped_frac   = (capped_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
+            kelly = _dc_replace(
+                kelly, bet_usdc=capped_usdc, shares=capped_shares, bet_fraction=capped_frac
+            )
 
         if scalp_mult < 1.0:
             scaled_usdc   = Decimal(str(round(float(kelly.bet_usdc) * scalp_mult, 2)))
             scaled_shares = (scaled_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            kelly = _dc_replace(kelly, bet_usdc=scaled_usdc, shares=scaled_shares)
+            scaled_frac   = (scaled_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
+            kelly = _dc_replace(
+                kelly, bet_usdc=scaled_usdc, shares=scaled_shares, bet_fraction=scaled_frac
+            )
             if float(kelly.bet_usdc) <= 0:
                 return FilterResult.fail("bet → 0 after vol/session scaling")
 

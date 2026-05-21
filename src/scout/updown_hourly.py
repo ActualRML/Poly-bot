@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -75,6 +76,7 @@ async def analyze_updown_hourly_market(
         max_entries    = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", HOURLY_MAX_ENTRIES_PER_SLOT)
         slot_history   = ctx.slot_history_count
         t_min          = ctx.t_min
+        wr_score       = ctx.extras.get("winrate_breakdown", {}).get("score", 0)
 
         log.info(
             f"[bold cyan][UPDOWN HOURLY][/bold cyan] {symbol} {t_min:.0f}m left | "
@@ -82,7 +84,7 @@ async def analyze_updown_hourly_market(
             f"sym 5m/15m/30m {sym_m5:+.2%}/{sym_momentum:+.2%}/{sym_m30:+.2%} "
             f"vol×{sym_vol_ratio:.2f} | "
             f"scalp={btc_scalp.get('action', '-') if btc_scalp else '-'} "
-            f"wr={ctx.buy_winrate:.2f} km={ctx.scalp_kelly_mult} | "
+            f"wr={ctx.buy_winrate:.2f} score={wr_score}/6 km={ctx.scalp_kelly_mult} | "
             f"slot {slot_history+1}/{max_entries} | Kelly ${float(kelly.bet_usdc):.2f}"
         )
 
@@ -94,14 +96,18 @@ async def analyze_updown_hourly_market(
         _record_gap  = abs(btc_regime or 0.0)
         _record_prob = str(round(ctx.buy_winrate, 4))
 
+        _breakdown = ctx.extras.get("winrate_breakdown")
+
         _diag_kwargs = {
             "sym_m5m":      float(sym_m5) if sym_m5 is not None else None,
             "sym_m15m":     float(sym_momentum) if sym_momentum is not None else None,
             "sym_m30m":     float(sym_m30) if sym_m30 is not None else None,
             "vol_ratio":    float(sym_vol_ratio) if sym_vol_ratio is not None else None,
             "btc_m15m":     float(btc_regime) if btc_regime is not None else None,
-            "scout_score":  None,
+            "scout_score":  decision.score,
             "mtf_aligned":  int(bool(sym_mtf.get("all_tf_aligned"))) if sym_mtf else None,
+            "predicted_prob":   ctx.buy_winrate,
+            "signal_breakdown": json.dumps(_breakdown) if _breakdown else None,
         }
 
         if config.DRY_RUN:

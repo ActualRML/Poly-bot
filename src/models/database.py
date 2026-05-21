@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS positions (
     btc_m15m        REAL,                   -- BTC 15m momentum at entry (macro regime)
     scout_score     INTEGER,                -- scout composite sub-score (renamed from regime_score)
     mtf_aligned     INTEGER,                -- 1 if 5m/15m/30m aligned, else 0
+    predicted_prob  REAL,                   -- heuristic winrate model output at entry
+    signal_breakdown TEXT,                  -- JSON per-signal breakdown from calculate_winrate
     UNIQUE(condition_id, outcome)
 );
 
@@ -121,6 +123,8 @@ def _migrate(conn):
         "btc_m15m":       "ALTER TABLE positions ADD COLUMN btc_m15m REAL",
         "scout_score":    "ALTER TABLE positions ADD COLUMN scout_score INTEGER",
         "mtf_aligned":    "ALTER TABLE positions ADD COLUMN mtf_aligned INTEGER",
+        "predicted_prob": "ALTER TABLE positions ADD COLUMN predicted_prob REAL",
+        "signal_breakdown": "ALTER TABLE positions ADD COLUMN signal_breakdown TEXT",
     }
     if "regime_score" in existing and "scout_score" not in existing:
         try:
@@ -153,12 +157,14 @@ def save_position(pos: dict) -> int:
             (condition_id, question, outcome, entry_price, current_price,
              highest_price, shares, capital_at_risk, resolve_date, entry_time,
              gap_pct, kelly_fraction, strategy_mode, token_id,
-             sym_m5m, sym_m15m, sym_m30m, vol_ratio, btc_m15m, scout_score, mtf_aligned)
+             sym_m5m, sym_m15m, sym_m30m, vol_ratio, btc_m15m, scout_score, mtf_aligned,
+             predicted_prob, signal_breakdown)
         VALUES
             (:condition_id, :question, :outcome, :entry_price, :current_price,
              :highest_price, :shares, :capital_at_risk, :resolve_date, :entry_time,
              :gap_pct, :kelly_fraction, :strategy_mode, :token_id,
-             :sym_m5m, :sym_m15m, :sym_m30m, :vol_ratio, :btc_m15m, :scout_score, :mtf_aligned)
+             :sym_m5m, :sym_m15m, :sym_m30m, :vol_ratio, :btc_m15m, :scout_score, :mtf_aligned,
+             :predicted_prob, :signal_breakdown)
         ON CONFLICT(condition_id, outcome) DO UPDATE SET
             status          = 'open',
             question        = excluded.question,
@@ -180,6 +186,8 @@ def save_position(pos: dict) -> int:
             btc_m15m        = excluded.btc_m15m,
             scout_score    = excluded.scout_score,
             mtf_aligned     = excluded.mtf_aligned,
+            predicted_prob  = excluded.predicted_prob,
+            signal_breakdown = excluded.signal_breakdown,
             exit_price      = NULL,
             exit_time       = NULL,
             pnl_usdc        = NULL,
@@ -203,6 +211,8 @@ def save_position(pos: dict) -> int:
     normalized.setdefault("btc_m15m", None)
     normalized.setdefault("scout_score", None)
     normalized.setdefault("mtf_aligned", None)
+    normalized.setdefault("predicted_prob", None)
+    normalized.setdefault("signal_breakdown", None)
 
     with get_conn() as conn:
         cur = conn.execute(sql, normalized)
@@ -350,7 +360,9 @@ def get_stats() -> dict:
                 SUM(CASE WHEN CAST(usdc_amount AS REAL) > 0 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN CAST(usdc_amount AS REAL) <= 0 THEN 1 ELSE 0 END) AS losses,
                 AVG(CAST(usdc_amount AS REAL))                  AS avg_pnl
-            FROM trades WHERE action IN ('exit', 'sell')
+            FROM trades
+            WHERE action IN ('exit', 'sell')
+              AND (notes IS NULL OR notes != 'force_close_no_price')
         """).fetchone()
         d = dict(row)
         total = d["total_trades"] or 0
@@ -399,6 +411,7 @@ def get_recent_closed_pnls(limit: int = 5) -> list[dict]:
         rows = conn.execute(
             """SELECT pnl_usdc FROM positions
                WHERE status = 'closed' AND pnl_usdc IS NOT NULL
+                 AND (exit_reason IS NULL OR exit_reason != 'force_close_no_price')
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()
@@ -413,7 +426,8 @@ def get_recent_closed_hourly(limit: int = 10) -> list[dict]:
         rows = conn.execute(
             """SELECT question, pnl_usdc FROM positions
                WHERE status = 'closed' AND pnl_usdc IS NOT NULL
-                 AND strategy_mode IN ('updown_hourly', 'updown_hourly_dry_run')
+                 AND strategy_mode LIKE 'updown_hourly%'
+                 AND (exit_reason IS NULL OR exit_reason != 'force_close_no_price')
                ORDER BY exit_time DESC LIMIT ?""",
             (limit,)
         ).fetchall()

@@ -144,7 +144,7 @@ Skip: 5m dan 15m markets.
 
 **Sizing**:
 
-- `buy_winrate = clamp(GBM prob_up, 0.50, 0.80)` — sisi yang dibeli; fallback 0.55 kalau GBM disabled
+- `buy_winrate = 0.33` hardcoded (historical WR baseline; GBM path archived 2026-05-12). Placeholder di `context.py` sampai per-signal winrate model dibuat — update manual tiap ~100 trade.
 - Kelly bet x `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; x1.2 mom aligned, x0.75 mom opposed)
 - Asia session: cap kelly_multiplier ke 0.7
 

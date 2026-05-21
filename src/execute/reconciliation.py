@@ -141,10 +141,12 @@ async def resolve_checker(
             if cached is not None:
                 price = float(cached)
 
+        _no_price_forced = False
         if price is None:
             if hours_past > 2:
                 entry_price = float(ke_decimal(pos["entry_price"]))
                 price = entry_price
+                _no_price_forced = True
                 log.warning(
                     f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} — "
                     f"tidak bisa fetch harga setelah {hours_past:.1f}h, force close @ entry"
@@ -157,9 +159,9 @@ async def resolve_checker(
                 continue
 
         if price >= 0.98 or price <= 0.02:
-            reason = "resolve_expired"
+            reason = "force_close_no_price" if _no_price_forced else "resolve_expired"
         elif hours_past > FORCE_CLOSE_GRACE_HOURS:
-            reason = "resolve_force_close"
+            reason = "force_close_no_price" if _no_price_forced else "resolve_force_close"
             log.warning(
                 f"[RESOLVE CHECK] {pos['question'][:45]} | {outcome} @ {price:.3f} — "
                 f"sudah {hours_past:.1f}h lewat resolve, force close di bid sekarang"
@@ -180,7 +182,7 @@ async def resolve_checker(
         manager._process_exit_manual(cid, outcome, ke_decimal(str(price)), pnl, reason)
         breaker.record_trade(float(pnl))
         if (
-            pos.get("strategy_mode") in ("updown_hourly", "updown_hourly_dry_run")
+            (pos.get("strategy_mode") or "").startswith("updown_hourly")
             and float(pnl) < 0
         ):
             _sym = detect_symbol_from_question(pos.get("question", ""))

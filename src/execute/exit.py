@@ -16,11 +16,26 @@ _SYMBOL_VOL: dict[str, float] = {
 }
 _VOL_BTC_BASELINE = 0.44
 
+_ASSET_NAME_TO_SYMBOL: dict[str, str] = {
+    "BTC": "BTC", "BITCOIN": "BTC",
+    "ETH": "ETH", "ETHEREUM": "ETH",
+    "SOL": "SOL", "SOLANA": "SOL",
+    "BNB": "BNB",
+    "XRP": "XRP", "RIPPLE": "XRP",
+    "DOGE": "DOGE", "DOGECOIN": "DOGE",
+}
+
 def _vol_scale_from_question(question: str) -> float:
-    m = _re.search(r'\b(BTC|ETH|SOL|BNB|XRP|DOGE)\b', question.upper())
+    m = _re.search(
+        r'\b(BTC|ETH|SOL|BNB|XRP|DOGE|BITCOIN|ETHEREUM|SOLANA|DOGECOIN|RIPPLE)\b',
+        question.upper(),
+    )
     if not m:
         return 1.0
-    vol = _SYMBOL_VOL.get(m.group(1), _VOL_BTC_BASELINE)
+    symbol = _ASSET_NAME_TO_SYMBOL.get(m.group(1))
+    if not symbol:
+        return 1.0
+    vol = _SYMBOL_VOL.get(symbol, _VOL_BTC_BASELINE)
     return _math.sqrt(vol / _VOL_BTC_BASELINE)
 
 class ExitSignal(Enum):
@@ -116,10 +131,6 @@ class ExitEvaluator:
         profit_lock_high_pct: float = 35.0,
         updown_profit_lock_pct: float = 40.0,
         updown_profit_lock_high_pct: float = 60.0,
-        hourly_profit_lock_pct: float = 30.0,
-        hourly_profit_lock_high_pct: float = 50.0,
-        hourly_trailing_activate_pct: float = 15.0,
-        hourly_trailing_retrace_pct: float = 0.30,
         # Tiered late-stage stop-loss with exclusive bands.
         # Filosofi: makin DEKAT resolve = makin LENIENT (threshold makin besar)
         # karena slippage extreme + result udah ditentukan.
@@ -153,10 +164,6 @@ class ExitEvaluator:
         self.profit_lock_high_pct = profit_lock_high_pct
         self.updown_profit_lock_pct = updown_profit_lock_pct
         self.updown_profit_lock_high_pct = updown_profit_lock_high_pct
-        self.hourly_profit_lock_pct = hourly_profit_lock_pct
-        self.hourly_profit_lock_high_pct = hourly_profit_lock_high_pct
-        self.hourly_trailing_activate_pct = hourly_trailing_activate_pct
-        self.hourly_trailing_retrace_pct = hourly_trailing_retrace_pct
         self.hourly_late_sl_t1_pct = hourly_late_sl_t1_pct
         self.hourly_late_sl_t1_max_remaining = hourly_late_sl_t1_max_remaining
         self.hourly_late_sl_t2_pct = hourly_late_sl_t2_pct
@@ -169,6 +176,7 @@ class ExitEvaluator:
         self.hourly_lock_t1_min_remaining = hourly_lock_t1_min_remaining
         self.hourly_lock_t2_pct = hourly_lock_t2_pct
         self.hourly_lock_t2_min_remaining = hourly_lock_t2_min_remaining
+        self.lock_anytime_pct = float(getattr(config, "UPDOWN_HOURLY_LOCK_ANYTIME_PCT", 150.0))
 
     _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
     _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
@@ -314,6 +322,20 @@ class ExitEvaluator:
                     estimated_pnl_usdc=self._calc_pnl(pos),
                     suggested_exit_price=pos.current_price,
                     reason=f"Late-SL INNER: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+
+            # Anytime high-profit TP: fires regardless of time-to-resolve.
+            # Safety net for late-window entries that have no T1/T2 coverage
+            # (T1/T2 require >20m/35m remaining). Threshold sits above the
+            # +80-90% winner cluster, so winner-clipping is minimal.
+            if pnl_pct >= self.lock_anytime_pct:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason="exit_lock_profit_anytime",
                 )
 
             # T1: near-max ITM — vol-scaled: DOGE locks at 132% if >7.6m left

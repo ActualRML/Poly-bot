@@ -61,10 +61,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
             profit_lock_high_pct         = getattr(config, "PROFIT_LOCK_HIGH_PCT", 35.0),
             updown_profit_lock_pct       = getattr(config, "UPDOWN_PROFIT_LOCK_PCT", 40.0),
             updown_profit_lock_high_pct  = getattr(config, "UPDOWN_PROFIT_LOCK_HIGH_PCT", 60.0),
-            hourly_profit_lock_pct       = getattr(config, "HOURLY_PROFIT_LOCK_PCT", 60.0),
-            hourly_profit_lock_high_pct  = getattr(config, "HOURLY_PROFIT_LOCK_HIGH_PCT", 60.0),
-            hourly_trailing_activate_pct = getattr(config, "HOURLY_TRAILING_ACTIVATE_PCT", 15.0),
-            hourly_trailing_retrace_pct  = getattr(config, "HOURLY_TRAILING_RETRACE_PCT", 0.30),
             hourly_late_sl_t4_pct           = getattr(config, "HOURLY_LATE_SL_T4_PCT", -45.0),
             hourly_late_sl_t4_max_remaining = getattr(config, "HOURLY_LATE_SL_T4_MAX_REMAINING", 40.0),
             hourly_lock_t1_pct           = getattr(config, "HOURLY_LOCK_T1_PCT", 80.0),
@@ -88,7 +84,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
     log.info(
         f"[bold green]Daily Crypto + Up/Down Daily + Up/Down Hourly aktif.[/bold green] "
         f"Threshold: dynamic [6-25%] | "
-        f"Min winrate: {getattr(config, 'HOURLY_MIN_WINRATE_STRICT', 0.75):.0%} | "
         f"Polling: {config.POLLING_INTERVAL}s"
     )
 
@@ -205,7 +200,8 @@ async def run_hourly_updown_mode(clob: ClobClient):
                             logger.warning(f"[BREAKER] record_trade error: {_e}")
 
                         if (
-                            _d.position.strategy_mode in ("updown_hourly", "updown_hourly_dry_run")
+                            _d.position.strategy_mode
+                            and _d.position.strategy_mode.startswith("updown_hourly")
                             and float(_d.estimated_pnl_usdc or 0) < 0
                         ):
                             _sym = detect_symbol_from_question(_d.position.question)
@@ -223,8 +219,9 @@ async def run_hourly_updown_mode(clob: ClobClient):
                                 f"{_d.position.outcome} SL'd — queued for reverse re-entry"
                             )
 
-                        if _d.signal == _XS.EXIT_LOCK_PROFIT and _d.position.strategy_mode in (
-                            "updown_hourly", "updown_hourly_dry_run"
+                        if _d.signal == _XS.EXIT_LOCK_PROFIT and (
+                            _d.position.strategy_mode
+                            and _d.position.strategy_mode.startswith("updown_hourly")
                         ):
                             if config.REENTRY_AFTER_TP_ENABLED:
                                 register_reentry_candidate(_d)
@@ -270,9 +267,7 @@ async def run_hourly_updown_mode(clob: ClobClient):
                         _fp_max_ent  = config.HOURLY_FLIP_MAX_ENTRY
 
                         for _fp in _fp_get_open():
-                            if _fp.get("strategy_mode") not in (
-                                "updown_hourly", "updown_hourly_dry_run"
-                            ):
+                            if not (_fp.get("strategy_mode") or "").startswith("updown_hourly"):
                                 continue
                             _fp_cid = _fp["condition_id"]
                             if _fp_cid in _hourly_flip_queue:
@@ -454,14 +449,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
 
                     btc_mtf = symbol_momentum_map.get("BTC", {})
                     btc_regime = btc_mtf.get("m_15m") if btc_mtf else None
-                    regime_thr = config.UPDOWN_HOURLY_MOMENTUM_THRESHOLD
-                    if btc_regime is not None and regime_thr > 0:
-                        if btc_regime > regime_thr:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BULLISH (momentum: beli Up)")
-                        elif btc_regime < -regime_thr:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → BEARISH (momentum: beli Down)")
-                        else:
-                            log.info(f"[REGIME] BTC momentum {btc_regime:+.2%} → NEUTRAL")
 
                     _btc_scalp = None
                     try:
