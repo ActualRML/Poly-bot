@@ -128,15 +128,6 @@ class Config:
     LOG_LEVEL        : str     = _get("LOG_LEVEL", "INFO")
     DRY_RUN          : bool    = _get_bool("DRY_RUN", True)
 
-    GEMINI_API_KEY              : str   = _get("GEMINI_API_KEY", "")
-    POLYMARKET_GEO_TOKEN        : str   = _get("POLYMARKET_GEO_TOKEN", "")
-    SCOUT_MIN_VOLUME_24H        : float = _get_float("SCOUT_MIN_VOLUME_24H", 50_000.0)
-    SCOUT_MAX_SPREAD_PCT        : float = _get_float("SCOUT_MAX_SPREAD_PCT", 0.08)
-    SCOUT_CATEGORIES            : str   = _get("SCOUT_CATEGORIES", "Crypto,Politics")
-    SCOUT_GEMINI_MODEL          : str   = _get("SCOUT_GEMINI_MODEL", "gemini-2.0-flash-lite")
-    SCOUT_GEMINI_MAX_CANDIDATES : int   = _get_int("SCOUT_GEMINI_MAX_CANDIDATES", 10)
-    SCOUT_INTERVAL_MINUTES      : int   = _get_int("SCOUT_INTERVAL_MINUTES", 5)
-
 
 config = Config()
 
