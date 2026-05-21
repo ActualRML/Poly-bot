@@ -43,7 +43,7 @@ async def scan_updown_hourly_markets(session: aiohttp.ClientSession, gamma: Gamm
     results = []
     now     = datetime.now(timezone.utc)
 
-    min_min = getattr(config, "UPDOWN_HOURLY_MIN_T_MINUTES", 5)
+    min_min = getattr(config, "UPDOWN_HOURLY_MIN_T_MINUTES", 20)
     max_min = getattr(config, "UPDOWN_HOURLY_MAX_MINUTES", 90)
     end_min = (now + timedelta(minutes=min_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
     end_max = (now + timedelta(minutes=max_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
