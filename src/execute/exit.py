@@ -176,6 +176,7 @@ class ExitEvaluator:
         self.hourly_lock_t1_min_remaining = hourly_lock_t1_min_remaining
         self.hourly_lock_t2_pct = hourly_lock_t2_pct
         self.hourly_lock_t2_min_remaining = hourly_lock_t2_min_remaining
+        self.lock_anytime_pct = float(getattr(config, "UPDOWN_HOURLY_LOCK_ANYTIME_PCT", 150.0))
 
     _DAILY_STRATEGIES  = {"daily", "daily_dry_run"}
     _UPDOWN_STRATEGIES = {"updown", "updown_dry_run"}
@@ -321,6 +322,20 @@ class ExitEvaluator:
                     estimated_pnl_usdc=self._calc_pnl(pos),
                     suggested_exit_price=pos.current_price,
                     reason=f"Late-SL INNER: {pnl_pct:.0f}% with {mins:.0f}m left",
+                )
+
+            # Anytime high-profit TP: fires regardless of time-to-resolve.
+            # Safety net for late-window entries that have no T1/T2 coverage
+            # (T1/T2 require >20m/35m remaining). Threshold sits above the
+            # +80-90% winner cluster, so winner-clipping is minimal.
+            if pnl_pct >= self.lock_anytime_pct:
+                return ExitDecision(
+                    signal=ExitSignal.EXIT_LOCK_PROFIT,
+                    should_exit=True,
+                    position=pos,
+                    estimated_pnl_usdc=self._calc_pnl(pos),
+                    suggested_exit_price=pos.current_price,
+                    reason="exit_lock_profit_anytime",
                 )
 
             # T1: near-max ITM — vol-scaled: DOGE locks at 132% if >7.6m left
