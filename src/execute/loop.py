@@ -26,10 +26,6 @@ from src.risk.slots import (
 )
 from src.risk.blacklist import check_symbol_blacklist, maybe_blacklist_symbol
 from src.scout.scanner import scan_updown_hourly_markets
-from src.execute.reentry_mgr import (
-    reentry_candidates, register_reentry_candidate, cleanup_reentry_candidates,
-    scan_reentry_opportunities,
-)
 from src.utils.parsing import detect_symbol_from_question
 from src.utils.pricing_cache import build_vol_data, prefetch_prices, _open_position_lock
 from src.models.token_backfill import backfill_missing_token_ids
@@ -223,8 +219,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
                             _d.position.strategy_mode
                             and _d.position.strategy_mode.startswith("updown_hourly")
                         ):
-                            if config.REENTRY_AFTER_TP_ENABLED:
-                                register_reentry_candidate(_d)
                             _profit_locked_markets[_d.position.condition_id] = _d.position.outcome
 
                         if not config.DRY_RUN and _d.position.token_id:
@@ -435,7 +429,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
                 if can_enter:
                     log.info("[bold]── UP/DOWN HOURLY ───────────────────────────────[/bold]")
                     cleanup_old_slots()
-                    cleanup_reentry_candidates()
 
                     from src.execute.updown import calculate_multi_tf_momentum as _mtf_mom
                     from src.scout.regime import CRYPTO_BASKET
@@ -738,13 +731,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
                                 )
                             except Exception as _ce:
                                 logger.warning(f"[CANDLE UPDOWN] Error analyze {cm.get('_symbol','?')}: {_ce}")
-
-                    if config.REENTRY_AFTER_TP_ENABLED and reentry_candidates:
-                        await scan_reentry_opportunities(
-                            clob, sizer, manager, breaker, capital, session,
-                            btc_scalp=_btc_scalp,
-                            symbol_momentum_map=symbol_momentum_map,
-                        )
 
             except asyncio.CancelledError:
                 raise
