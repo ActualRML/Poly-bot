@@ -85,7 +85,6 @@ class Config:
     UPDOWN_HOURLY_US_MAIN_KELLY_CAP   : float = _get_float("UPDOWN_HOURLY_US_MAIN_KELLY_CAP", 0.7)
     CANDLE_ENABLED                    : bool  = _get_bool("CANDLE_ENABLED", False)
     HOURLY_FLIP_ENABLED               : bool  = _get_bool("HOURLY_FLIP_ENABLED", False)
-    REENTRY_AFTER_TP_ENABLED          : bool  = _get_bool("REENTRY_AFTER_TP_ENABLED", False)
     FILTER_MOMENTUM_CAP_ENABLED       : bool  = _get_bool("FILTER_MOMENTUM_CAP_ENABLED", False)
     UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE : float = _get_float("UPDOWN_DAILY_MIN_HOURS_TO_RESOLVE", 2.0)
     UPDOWN_VOL_FLOOR                  : float = _get_float("UPDOWN_VOL_FLOOR", 0.50)
