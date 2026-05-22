@@ -80,6 +80,7 @@ async def run_hourly_updown_mode(clob: ClobClient):
         f"Threshold: dynamic [6-25%] | "
         f"Polling: {config.POLLING_INTERVAL}s"
     )
+    from src.risk.manager import BASE_SIZE_PCT as _BASE_SIZE_PCT, MIN_POSITION_USDC as _MIN_POS
     log.info(
         "[CONFIG] "
         f"DRY_RUN={config.DRY_RUN} CB_ENABLED={config.CB_ENABLED} "
@@ -90,7 +91,7 @@ async def run_hourly_updown_mode(clob: ClobClient):
         f"MAX_OPEN_POSITIONS={config.MAX_OPEN_POSITIONS} "
         f"MAX_POSITIONS_PER_SLOT={config.MAX_POSITIONS_PER_SLOT} "
         f"MAX_ENTRIES_PER_SLOT={config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT} "
-        f"BASE_SIZE_PCT=0.05 "
+        f"BASE_SIZE_PCT={_BASE_SIZE_PCT} MIN_POSITION_USDC={_MIN_POS} "
         f"EV_GATE_ENABLED={getattr(config, 'EV_GATE_ENABLED', True)} "
         f"EV_GATE_MIN_MARGIN={getattr(config, 'EV_GATE_MIN_MARGIN', 0.02)}"
     )
