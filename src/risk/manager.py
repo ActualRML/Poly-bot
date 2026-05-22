@@ -6,9 +6,24 @@ logger = logging.getLogger(__name__)
 MIN_STOP_FRACTION: float    = 0.05
 MAX_STOP_FRACTION: float    = 0.45
 
-MIN_POSITION_USDC: float    = 10.0
+MIN_POSITION_USDC: float    = 3.0
 MAX_POSITION_USDC: float    = 75.0
 BASE_POSITION_USDC: float   = 30.0
+
+# Interim sizing (2026-05-23 refactor): fixed-fractional per-symbol.
+# Replaces 5-trade streak heuristic + Kelly half-bet. Deterministic.
+BASE_SIZE_PCT: float = 0.08  # 8% of capital per trade (pre-multiplier)
+
+SYMBOL_SIZE_MULT: dict[str, float] = {
+    "BTC":  1.0,
+    "ETH":  0.6,
+    "SOL":  0.6,
+    "DOGE": 0.4,
+    "XRP":  0.3,
+    "BNB":  0.5,
+}
+DEFAULT_SYMBOL_MULT: float = 0.5  # fallback for unknown symbols
+
 
 def vol_size_multiplier(vol_state: str) -> float:
     """Size multiplier based on market volatility regime."""
@@ -40,54 +55,32 @@ def get_dynamic_stop_loss(
     )
     return result
 
+
 def calculate_position_size(
-    last_5_trades: list[dict],
+    last_5_trades: Optional[list] = None,
     capital: float = 0.0,
     base_size: float = BASE_POSITION_USDC,
+    symbol: Optional[str] = None,
+    winrate: Optional[float] = None,
 ) -> float:
-    from src.utils.config import config
-    _base_pct = getattr(config, "RISK_BASE_SIZE_PCT", 0.15)
-    _min_pct  = getattr(config, "RISK_MIN_SIZE_PCT",  0.08)
-    _max_pct  = getattr(config, "RISK_MAX_SIZE_PCT",  0.20)
+    """
+    Fixed-fractional per-symbol sizing (2026-05-23 refactor).
 
-    if capital > 0:
-        base_size = max(MIN_POSITION_USDC, capital * _base_pct)
+    size = clamp(capital * BASE_SIZE_PCT * SYMBOL_SIZE_MULT[symbol],
+                 MIN_POSITION_USDC, MAX_POSITION_USDC)
 
-    if not last_5_trades:
+    `last_5_trades` and `winrate` are accepted for backward compatibility
+    but ignored — sizing is deterministic per (capital, symbol).
+    """
+    if capital <= 0:
         return base_size
 
-    consecutive_wins   = 0
-    consecutive_losses = 0
-
-    for trade in reversed(last_5_trades):
-        pnl = float(trade.get("pnl", 0))
-        if pnl > 0:
-            if consecutive_losses > 0:
-                break
-            consecutive_wins += 1
-        else:
-            if consecutive_wins > 0:
-                break
-            consecutive_losses += 1
-
-    if consecutive_losses >= 2:
-        size = max(MIN_POSITION_USDC, capital * _min_pct) if capital > 0 else MIN_POSITION_USDC
-        logger.info(
-            f"[RISK] {consecutive_losses} consecutive losses "
-            f"→ posisi turun ke ${size:.1f}"
-        )
-        return size
-
-    if consecutive_wins >= 3:
-        if capital > 0:
-            new_size = max(MIN_POSITION_USDC, capital * _max_pct)
-        else:
-            bonus    = min((consecutive_wins - 2) * 5.0, MAX_POSITION_USDC - base_size)
-            new_size = min(base_size + bonus, MAX_POSITION_USDC)
-        logger.info(
-            f"[RISK] {consecutive_wins} consecutive wins "
-            f"→ posisi naik ke ${new_size:.1f}"
-        )
-        return new_size
-
-    return base_size
+    sym = (symbol or "").upper()
+    mult = SYMBOL_SIZE_MULT.get(sym, DEFAULT_SYMBOL_MULT)
+    raw = capital * BASE_SIZE_PCT * mult
+    sized = max(MIN_POSITION_USDC, min(MAX_POSITION_USDC, raw))
+    logger.debug(
+        f"[SIZE] {sym or '?'} cap=${capital:.2f} mult={mult:.2f} "
+        f"raw=${raw:.2f} sized=${sized:.2f}"
+    )
+    return sized

@@ -11,8 +11,7 @@ from src.api.gamma_client import GammaClient
 from src.risk.kelly import KellySizer
 from src.execute.exit import ExitEvaluator
 from src.execute.position import PositionManager
-# ARCHIVED: CB_ENABLED=false — revive by moving src/_archive/circuit.py back to src/risk/
-from src._archive.circuit import CircuitBreaker
+from src.risk.circuit import CircuitBreaker
 from src.models.types import SisiOrder
 from src.models.database import log_prediction, get_recent_closed_pnls
 from src.utils.config import config
@@ -22,7 +21,6 @@ from src.risk.manager import get_dynamic_stop_loss, calculate_position_size
 from src.execute.candle import scan_candle_markets, analyze_candle_market
 from src.risk.slots import (
     slot_history_count, record_slot_entry, cleanup_old_slots,
-    HOURLY_MAX_ENTRIES_PER_SLOT,
 )
 from src.risk.blacklist import check_symbol_blacklist, maybe_blacklist_symbol
 from src.scout.scanner import scan_updown_hourly_markets
@@ -40,14 +38,14 @@ logger = logging.getLogger(__name__)
 async def run_hourly_updown_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
     sizer   = KellySizer(
-        kelly_multiplier = getattr(config, "KELLY_MULTIPLIER", 0.5),
-        max_fraction     = getattr(config, "MAX_KELLY_FRACTION", 0.30),
+        kelly_multiplier = getattr(config, "KELLY_MULTIPLIER", 0.7),
+        max_fraction     = getattr(config, "MAX_KELLY_FRACTION", 0.25),
         min_bet_usdc     = getattr(config, "MIN_BET_USDC", 5.0),
-        min_winrate      = getattr(config, "MIN_WINRATE", 0.52),
+        min_winrate      = getattr(config, "MIN_WINRATE", 0.15),
     )
     manager = PositionManager(
-        max_open_positions     = getattr(config, "MAX_OPEN_POSITIONS", 5),
-        max_capital_per_market = getattr(config, "MAX_CAPITAL_PER_MARKET", 30.0),
+        max_open_positions     = getattr(config, "MAX_OPEN_POSITIONS", 10),
+        max_capital_per_market = getattr(config, "MAX_CAPITAL_PER_MARKET", 75.0),
         max_same_direction     = getattr(config, "MAX_SAME_DIRECTION", 2),
         exit_evaluator         = ExitEvaluator(
             trailing_stop_pct       = getattr(config, "TRAILING_STOP_PCT", 0.15),
@@ -67,9 +65,9 @@ async def run_hourly_updown_mode(clob: ClobClient):
     )
     breaker = CircuitBreaker(
         starting_capital       = float(config.SALDO_AWAL),
-        max_drawdown_pct       = getattr(config, "MAX_DRAWDOWN_PCT", 0.30),
-        max_daily_loss_pct     = getattr(config, "MAX_DAILY_LOSS_PCT", 0.10),
-        max_consecutive_losses = getattr(config, "MAX_CONSECUTIVE_LOSSES", 3),
+        max_drawdown_pct       = getattr(config, "MAX_DRAWDOWN_PCT", 0.40),
+        max_daily_loss_pct     = getattr(config, "MAX_DAILY_LOSS_PCT", 0.20),
+        max_consecutive_losses = getattr(config, "MAX_CONSECUTIVE_LOSSES", 5),
     )
 
     init_telegram(
@@ -81,6 +79,20 @@ async def run_hourly_updown_mode(clob: ClobClient):
         f"[bold green]Daily Crypto + Up/Down Daily + Up/Down Hourly aktif.[/bold green] "
         f"Threshold: dynamic [6-25%] | "
         f"Polling: {config.POLLING_INTERVAL}s"
+    )
+    log.info(
+        "[CONFIG] "
+        f"DRY_RUN={config.DRY_RUN} CB_ENABLED={config.CB_ENABLED} "
+        f"SALDO_AWAL={float(config.SALDO_AWAL)} "
+        f"MIN_WINRATE={config.MIN_WINRATE} "
+        f"KELLY_MULT={config.KELLY_MULTIPLIER} MAX_KELLY_FRAC={config.MAX_KELLY_FRACTION} "
+        f"MAX_CAPITAL_PER_MARKET={config.MAX_CAPITAL_PER_MARKET} "
+        f"MAX_OPEN_POSITIONS={config.MAX_OPEN_POSITIONS} "
+        f"MAX_POSITIONS_PER_SLOT={config.MAX_POSITIONS_PER_SLOT} "
+        f"MAX_ENTRIES_PER_SLOT={config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT} "
+        f"BASE_SIZE_PCT=0.05 "
+        f"EV_GATE_ENABLED={getattr(config, 'EV_GATE_ENABLED', True)} "
+        f"EV_GATE_MIN_MARGIN={getattr(config, 'EV_GATE_MIN_MARGIN', 0.02)}"
     )
 
     async with aiohttp.ClientSession() as session:

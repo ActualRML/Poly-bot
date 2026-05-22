@@ -64,7 +64,9 @@ class SizingFilter(Filter):
                 scalp_mult = min(scalp_mult, vol_km)
 
         max_size = calculate_position_size(
-            get_recent_closed_pnls(limit=5), capital=float(ctx.capital)
+            get_recent_closed_pnls(limit=5),
+            capital=float(ctx.capital),
+            symbol=ctx.symbol,
         )
         cap_dec = Decimal(str(float(ctx.capital)))
         if float(kelly.bet_usdc) > max_size:

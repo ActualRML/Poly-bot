@@ -260,6 +260,36 @@ class PriceBandFilter(Filter):
         return FilterResult.pass_()
 
 
+class EvGateFilter(Filter):
+    """
+    Reject when buy_price exceeds (winrate - margin). With flat winrate=0.50
+    and default margin=0.02, threshold = 0.48 — markets priced above this
+    require positive edge against the bot's flat probability model.
+
+    Gated by EV_GATE_ENABLED. Margin via EV_GATE_MIN_MARGIN.
+    """
+
+    name = "ev_gate"
+
+    def evaluate(self, ctx: ScoutContext) -> FilterResult:
+        from src.utils.config import config
+        if not getattr(config, "EV_GATE_ENABLED", True):
+            return FilterResult.pass_(reason="filter_disabled")
+        margin = float(getattr(config, "EV_GATE_MIN_MARGIN", 0.02))
+        threshold = float(ctx.buy_winrate) - margin
+        if ctx.buy_price > threshold:
+            return FilterResult.fail(
+                f"buy_price {ctx.buy_price:.3f} > "
+                f"winrate {ctx.buy_winrate:.2f} - margin {margin:.2f} "
+                f"= {threshold:.3f} (no edge)",
+                value={"buy_price": ctx.buy_price, "threshold": threshold},
+            )
+        return FilterResult.pass_(
+            reason=f"buy_price {ctx.buy_price:.3f} <= threshold {threshold:.3f}",
+            value={"buy_price": ctx.buy_price, "threshold": threshold},
+        )
+
+
 SIGNAL_FILTERS: list[Filter] = [
     MinMomentumFilter(),
     MaxMomentumCapFilter(),
@@ -271,4 +301,5 @@ SIGNAL_FILTERS: list[Filter] = [
     MarketStateFilter(),
     BtcCorrelationFilter(),
     PriceBandFilter(),
+    EvGateFilter(),
 ]

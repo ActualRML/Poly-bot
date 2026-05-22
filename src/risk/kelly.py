@@ -1,8 +1,37 @@
+"""
+DEPRECATED (2026-05-23): Kelly sizing replaced by fixed-fractional in
+risk/manager.py. File retained untuk reference & potential revival.
+
+KellySizer.calculate() still runs and returns a positive bet (used by
+SizingFilter), but its output is now capped by calculate_position_size
+which is the binding sizer. With flat winrate=0.50 the Kelly raw bet is
+small and the cap is what matters.
+"""
+
+import logging as _logging
 from decimal import Decimal
 from dataclasses import dataclass
 from typing import Optional
 
 from src.risk.pricing import ke_decimal, hitung_midpoint, validasi_harga
+
+_logger = _logging.getLogger(__name__)
+_kelly_import_warned = False
+
+
+def _warn_kelly_use(caller: str) -> None:
+    global _kelly_import_warned
+    if _kelly_import_warned:
+        return
+    _kelly_import_warned = True
+    _logger.warning(
+        f"[KELLY DEPRECATED] {caller} imports kelly.py — sizing now driven "
+        "by risk/manager.calculate_position_size (fixed-fractional). "
+        "KellySizer kept for compat; output is capped downstream."
+    )
+
+
+_warn_kelly_use("module-import")
 
 @dataclass
 class KellyResult:

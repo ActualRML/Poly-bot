@@ -12,7 +12,7 @@ from src.utils.pricing_cache import _open_position_lock
 from src.utils.telegram_alert import get_alert
 from src.models.types import SisiOrder
 from src.models.database import log_prediction
-from src.risk.slots import record_slot_entry, HOURLY_MAX_ENTRIES_PER_SLOT
+from src.risk.slots import record_slot_entry
 from src.scout.context import ScoutContext
 from src.scout.scout import evaluate_entry
 
@@ -73,7 +73,7 @@ async def analyze_updown_hourly_market(
         sym_m5         = sym_mtf.get("m_5m", 0.0)
         sym_m30        = sym_mtf.get("m_30m", 0.0)
         sym_vol_ratio  = sym_mtf.get("vol_ratio", 0.0)
-        max_entries    = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", HOURLY_MAX_ENTRIES_PER_SLOT)
+        max_entries    = config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT
         slot_history   = ctx.slot_history_count
         t_min          = ctx.t_min
         wr_score       = ctx.extras.get("winrate_breakdown", {}).get("score", 0)

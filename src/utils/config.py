@@ -111,6 +111,8 @@ class Config:
     UPDOWN_HOURLY_T_EDGE_MULT_TIGHT    : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_TIGHT", 1.5)
     UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL : float = _get_float("UPDOWN_HOURLY_T_EDGE_MULT_CRITICAL", 2.0)
     FLASH_CRASH_HARD_SKIP             : bool  = _get_bool("FLASH_CRASH_HARD_SKIP", True)
+    EV_GATE_ENABLED                   : bool  = _get_bool("EV_GATE_ENABLED", True)
+    EV_GATE_MIN_MARGIN                : float = _get_float("EV_GATE_MIN_MARGIN", 0.02)
     CANDLE_HOLD_LIMIT_MIN             : float = _get_float("CANDLE_HOLD_LIMIT_MIN", 5.0)
     CANDLE_HOLD_LIMIT_PNL_PCT         : float = _get_float("CANDLE_HOLD_LIMIT_PNL_PCT", 0.0)
     CANDLE_ONE_SIDED_HIGH             : float = _get_float("CANDLE_ONE_SIDED_HIGH", 0.82)

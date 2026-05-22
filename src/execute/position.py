@@ -19,21 +19,24 @@ from src.models.database import (
     resolve_prediction,
 )
 from src.risk.pricing import ke_decimal
+from src.utils.config import config
 
 logger = logging.getLogger(__name__)
 
-MAX_OPEN_POSITIONS = 10
-MAX_CAPITAL_PER_MARKET = 75
 
 class PositionManager:
 
     def __init__(
         self,
-        max_open_positions: int = MAX_OPEN_POSITIONS,
-        max_capital_per_market: float = MAX_CAPITAL_PER_MARKET,
+        max_open_positions: Optional[int] = None,
+        max_capital_per_market: Optional[float] = None,
         exit_evaluator: Optional[ExitEvaluator] = None,
         max_same_direction: int = 0,
     ):
+        if max_open_positions is None:
+            max_open_positions = config.MAX_OPEN_POSITIONS
+        if max_capital_per_market is None:
+            max_capital_per_market = config.MAX_CAPITAL_PER_MARKET
         self.max_open = max_open_positions
         self.max_capital_per_market = max_capital_per_market
         self.exit_evaluator = exit_evaluator or ExitEvaluator()

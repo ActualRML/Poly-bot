@@ -24,8 +24,7 @@ class SlotCumulativeCapFilter(Filter):
 
     def evaluate(self, ctx: ScoutContext) -> FilterResult:
         from src.utils.config import config
-        from src.risk.slots import HOURLY_MAX_ENTRIES_PER_SLOT
-        cap = getattr(config, "UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT", HOURLY_MAX_ENTRIES_PER_SLOT)
+        cap = config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT
         if ctx.slot_history_count >= cap:
             return FilterResult.fail(
                 f"{ctx.slot_history_count}/{cap} CUMULATIVE entries di slot "

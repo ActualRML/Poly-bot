@@ -1,263 +1,185 @@
-# Polymarket Trading Bot
+# Project Context
+
+Polymarket prediction-market bot. Asynchronous Python loop that scans Polymarket "Up/Down hourly" binary markets for BTC/ETH/SOL/XRP/DOGE/BNB and bets WITH 15m momentum.
+
+- **Only active strategy**: `updown_hourly_momentum` (single entrypoint loop).
+- **Default mode**: `DRY_RUN=True`, `CB_ENABLED=False`, modal $120 (`SALDO_AWAL`).
+- Live trading possible (`pasang_order` wired to py-clob-client) but no fill-confirmation polling.
 
 @STRATEGY_MISTAKES.md
 
-## Workflow Rule: Strategy Changes Must Backtest First
-
-Any change to strategy logic (scout/, risk/sizing, exit thresholds, regime gating, new signals) follows this order:
-
-1. **Backtest first** — via `script/backtest.py` against historical data (≥30 days, or all available history).
-   - Required outputs: WR, profit factor, max drawdown, trade count, per-symbol breakdown.
-   - Pass criteria (configurable, default): WR ≥ 55%, profit factor ≥ 1.3, max DD ≤ 20% of starting capital.
-   - If backtest fails criteria → strategy does NOT go to DRY_RUN. Iterate on backtest until it passes or the hypothesis is abandoned.
-
-2. **DRY_RUN only after backtest pass** — minimum 7 days of paper trading with the new logic before any further change.
-
-3. **Live (when applicable) only after DRY_RUN matches backtest expectations** — paper WR and PF within 20% of backtest values.
-
-Exceptions: config-only changes (thresholds, polling interval, position caps) that don't alter strategy logic can skip backtest IF the change is conservative (tighter risk, not looser). Loosening any risk param → backtest required.
-
-Anti-pattern to avoid: shipping a strategy hypothesis directly to DRY_RUN "to see what happens." DRY_RUN is validation, not exploration. Exploration happens in backtest.
-
----
-
-## Agent Debate Protocol
-
-For new features or complex logic, run this internal process **before writing any code**. Skip for simple tasks ("fix typo", "change color").
-
-1. **Identity Split** — debate between:
-   - _Architect_: scalability, design patterns, clean code
-   - _Pragmatist_: simplicity, speed, no over-engineering
-   - _Security/QA_: edge cases, vulnerabilities, error handling
-
-2. **Debate Phase** — 1–2 rounds of disagreement/alignment
-
-3. **Consensus** — agreed-upon approach
-
-4. **Execution** — write code based on consensus
-
----
-
-## Token Saving (CRITICAL)
-
-- **Zero filler**: Jangan "I understand", "Based on the code", "Let me know if..." — langsung action.
-- **Short confirm**: Cukup "Done" / "Fixed" untuk task admin.
-- **Terminal truncation**: Selalu pipe `| Select-Object -Last 50` (PowerShell) atau `| tail -n 50` (bash).
-- **Diff only**: Edit file → snippet perubahan saja, jangan tulis ulang seluruh file.
-- **Test errors**: Tampilkan Traceback + Error Message terakhir saja.
-- **No re-read**: Jangan baca ulang file yang sudah ada di chat history.
-
----
-
-## Struktur
+## Architecture
 
 ```
-src/main.py               → entry point + main loop
-src/scout/                → market discovery + signal generation
-  scanner.py              → scan updown hourly markets
-  regime.py               → cross-asset regime filter
-  gbm.py                  → GBM probability model (directional fair-value)
-  mispricing.py           → mispricing detector
-  oracle_arb.py           → GBM math (gbm_prob_above)
-  technical.py            → RSI, z-score, EMA, trend
-src/risk/                 → sizing, circuit breaker, filters
-  manager.py              → dynamic stop loss + position sizing
-  kelly.py                → Kelly criterion sizer
-  circuit.py              → circuit breaker (daily loss / consecutive loss / drawdown)
-  blacklist.py            → per-symbol 4h pause after 3 consecutive losses
-  slots.py                → slot cap + cumulative entry tracking
-  pricing.py              → ke_decimal, hitung_midpoint, validasi_harga
-  probability.py          → CryptoProbabilityCalculator (daily strategy)
-  stagnation.py           → price stagnation tracker
-src/execute/              → entry, exit, reentry, position mgmt
-  exit.py                 → ExitEvaluator, PortfolioExitManager (TP + SL bands)
-  reentry.py              → same-direction reentry logic
-  reentry_mgr.py          → reentry candidate scanner + lifecycle
-  scalping.py             → scalping exit signals
-  position.py             → PositionManager (open/close/resolve)
-  strategy.py             → dynamic threshold + force exit helpers
-  candle.py               → candle strategy scanner + analyzer
-  updown.py               → up/down daily strategy helpers
-src/api/                  → CLOB, Gamma, Binance clients
-src/utils/                → config, logger, parsing, telegram_alert
-src/models/               → database (SQLite), types
-script/recalibrate.py     → auto-recalibration BTC/ETH/SOL/BNB
-script/monitor.py         → monitor posisi (stdout)
-script/monitor_bot.py     → Telegram bot interaktif (/status, /positions, /trades, /stats)
+src/main.py                    → entrypoint, spawns single loop
+src/execute/loop.py            → cycle: scan → regime → cycle_gate → per-market analyze → exit eval
+src/scout/scanner.py           → Gamma /events discovery (slug-prefix match)
+src/scout/updown_hourly.py     → per-market driver (build context → evaluate_entry → place order)
+src/scout/scout.py             → 5-stage filter pipeline w/ short-circuit
+src/scout/filters/*.py         → DISCOVERY(0) PRECHECK(6) SIGNAL(10) RISK(4) EXEC(4)
+src/execute/exit.py            → vol-scaled TP/SL bands per strategy_mode
+src/risk/{kelly,manager,slots,blacklist,stagnation,pricing}.py
+src/api/{clob,gamma,binance}_client.py
+src/models/database.py         → SQLite (positions, trades, predictions)
 ```
 
-## Config Files
+Data flow: `scan_updown_hourly_markets` → `ScoutCycleGate.evaluate` → `analyze_updown_hourly_market` → `ScoutContext.build` → `evaluate_entry` (24 filters) → `SizingFilter` (Kelly × multipliers) → `clob.pasang_order` → `manager.open_position` → SQLite.
 
-- `.env.secret` → credentials (gitignored)
-- `.env.local` → strategy params (gitignored)
-- `.env.example` → template (committed) — **jangan commit env files**
+## Key Files
 
----
+| Purpose | Path:line |
+|---|---|
+| Entrypoint | `src/main.py:11` |
+| Main loop body | `src/execute/loop.py:40` `run_hourly_updown_mode` |
+| Filter pipeline | `src/scout/scout.py:40` `evaluate_entry` |
+| Direction decision (momentum sign) | `src/scout/filters/signal.py:87` |
+| Sizing (Kelly × km × session cap) | `src/scout/filters/exec.py:22` `SizingFilter` |
+| Exit bands (T1–T4 SL, T1/T2 TP, anytime 150%) | `src/execute/exit.py:259` |
+| Position write/read | `src/execute/position.py:72` `open_position` |
+| DB schema + migrations | `src/models/database.py:29` |
+| Cycle-wide gate (CB / flash-crash) | `src/scout/cycle.py:18` |
+| Heuristic winrate (6-bin score) | `src/scout/probability.py:39` |
 
-## Strategies (semua paper trade, DRY_RUN=True, modal $120)
+## Active vs Disabled Features
 
-### 1. Crypto Daily
+| Feature | Flag | Default | Code path | Status |
+|---|---|---|---|---|
+| Hourly momentum entry | — | always on | `loop.py:702` | ACTIVE |
+| Flash-crash hard skip | `FLASH_CRASH_HARD_SKIP` | True | `cycle.py:65` | ACTIVE |
+| Anytime TP at +150% | `UPDOWN_HOURLY_LOCK_ANYTIME_PCT` | 150.0 | `exit.py:331` | ACTIVE |
+| Candle 1h-resolve strategy | `CANDLE_ENABLED` | False | `execute/candle.py` | DISABLED (file loaded) |
+| Hourly-flip (loss-reversal) | `HOURLY_FLIP_ENABLED` | False | `loop.py:251,494` | DISABLED |
+| Max-momentum cap filter | `FILTER_MOMENTUM_CAP_ENABLED` | False | `filters/signal.py:35` | DISABLED |
+| Macro-regime trend gate | `UPDOWN_HOURLY_MACRO_TREND_GATE` | False | `cycle.py:77` | DISABLED |
+| Circuit breaker | `CB_ENABLED` | False | `_archive/circuit.py` via `loop.py:15` | DISABLED |
+| Candle reverse re-entry | (depends on `CANDLE_ENABLED`) | — | `execute/reentry.py` | DORMANT |
 
-Market "Will BTC be above $X?" resolve 5m–24h. Asset: BTC, ETH, SOL, BNB.
-Model: log-normal + barrier. Threshold dynamic: `vol/sqrt(24)*1.5` clamped [6%, 25%].
-Recalibrate: `python -m script.recalibrate` (setiap 30–60 hari).
+## State Persistence Map
 
-### 2. Up/Down Daily
+| State | Location | Survives restart? |
+|---|---|---|
+| positions, trades, predictions | SQLite `data/bot_database.db` | YES |
+| circuit breaker | `data/circuit_breaker.json` | YES (when enabled) |
+| TARIK flag | `data/tarik.flag` | manual file trigger |
+| **slot history counter** | `_hourly_slot_history` dict in `risk/slots.py:5` | **NO** |
+| **symbol blacklist** | `_symbol_blacklist_until` dict in `risk/blacklist.py:7` | **NO** |
+| **market price stagnation** | `_market_price_history` dict in `risk/stagnation.py:3` | **NO** |
+| `_profit_locked_markets`, `_candle_sl_markets`, `_hourly_flip_queue` | locals in `run_hourly_updown_mode` | **NO** |
+| Binance price/vol/klines cache | module globals in `api/binance_client.py:24-49` | NO |
 
-Market "BTC Up or Down?" resolve 16:00 UTC. Asset: BTC (41), ETH (40), SOL (10086), XRP (10100).
-Ref price: Binance 1m close 16:00 UTC kemarin. Min edge: `UPDOWN_THRESHOLD=0.05`.
+## Risk Parameters (live values, from `src/utils/config.py`)
 
-### 3. Up/Down Hourly — GBM PROBABILITY (directional fair-value)
+| Param | Default | Notes |
+|---|---|---|
+| `BASE_SIZE_PCT` (constant) | 0.08 | hardcoded at `risk/manager.py:15`; new fixed-fractional sizer |
+| `MIN_BET_USDC` | 5.0 | KellySizer min — Kelly path deprecated |
+| `MIN_POSITION_USDC` / `_MAX` (constants) | 3 / 75 | hard floor/ceiling at `risk/manager.py:9-10` |
+| `MAX_OPEN_POSITIONS` | 10 | |
+| `MAX_CAPITAL_PER_MARKET` | 75.0 | single SoT now (constants removed from `position.py`) |
+| `MAX_SAME_DIRECTION` | 2 | .env.example says 3 (env wins) |
+| `MAX_POSITIONS_PER_SLOT` | 5 | open posn cap per resolve slot |
+| `UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT` | 6 | cumulative cap per slot |
+| `UPDOWN_HOURLY_MIN_T_MINUTES` | 20 | entry time-floor |
+| `UPDOWN_HOURLY_MIN_ENTRY_PRICE` / `_MAX_ENTRY_PRICE` | 0.25 / 0.65 | price band |
+| `UPDOWN_HOURLY_MOMENTUM_MIN` | 0.0015 | thr = max(MIN, vol_15m × VOL_FACTOR) |
+| `UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR` | 0.75 | |
+| `EV_GATE_ENABLED` | True | reject `buy_price > winrate − margin` |
+| `EV_GATE_MIN_MARGIN` | 0.02 | with flat winrate=0.50 → threshold 0.48 |
+| `HOURLY_LOCK_T1_PCT` / `_T2_PCT` | 80 / 50 | .env.example T2=70 (DIVERGES) |
+| `UPDOWN_HOURLY_LOCK_ANYTIME_PCT` | 150.0 | late-window safety TP |
+| `HOURLY_SL_MIN_AGE_MINUTES` | 10 | grace before T3/T4 SL fires |
+| `HOURLY_FLIP_TRIGGER_PCT` | -40 | .env.example -50 (DIVERGES) |
+| `POLLING_INTERVAL_DETIK` | 5 | .env.example 30 (DIVERGES) |
+| `SALDO_AWAL` | 120 | |
+| `DRY_RUN` / `CB_ENABLED` | True / False | |
 
-Market "BTC Up or Down - 1AM ET?" resolve tiap jam. Asset: BTC, ETH, SOL, XRP, DOGE, BNB.
-Skip: 5m dan 15m markets.
+Per-coin vol scaling for SL/TP is **hardcoded** at `exit.py:13-16` (BTC 0.44 .. DOGE 1.00) — not configurable.
 
-**Direction logic — `src/scout/gbm.py`**:
+## Per-Symbol Sizing (interim, 2026-05-23)
 
-- Strike = Binance 1h candle open di start_date (cached per market)
-- `P(Up) = gbm_prob_above(current, strike, vol_annual, T_remaining)` (closed-form GBM)
-- `edge_up   = P(Up)     - market_price_up   - fee`
-- `edge_down = (1-P(Up)) - market_price_down - fee`
-- Pick side dengan edge ≥ `adj_min_edge`, else SKIP
-  `adj_min_edge = max(UPDOWN_HOURLY_GBM_MIN_EDGE, vol_annual x UPDOWN_GBM_VOL_EDGE_FACTOR)`
-  e.g. DOGE (100%) → 10%, BNB (56%) → 5.6%, BTC (44%) → 4.4%
-- Toggle `UPDOWN_HOURLY_USE_GBM=false` → fallback ke contrarian lama
+`size = clamp(capital × BASE_SIZE_PCT × multiplier, MIN_POSITION_USDC, MAX_POSITION_USDC)`
 
-**Filter stack** (tiap entry harus lolos semua):
+| Symbol | Multiplier | Effective %cap (raw) | Size at $120 capital |
+|---|---|---|---|
+| BTC  | 1.0 | 8.0% | $9.60 |
+| ETH  | 0.6 | 4.8% | $5.76 |
+| SOL  | 0.6 | 4.8% | $5.76 |
+| BNB  | 0.5 | 4.0% | $4.80 |
+| DOGE | 0.4 | 3.2% | $3.84 |
+| XRP  | 0.3 | 2.4% | $3.00 (clamped to MIN=$3) |
+| _unknown_ | 0.5 | 4.0% | $4.80 (DEFAULT_SYMBOL_MULT) |
 
-1. Slot cap: `MAX_POSITIONS_PER_SLOT=2` open + `_HOURLY_MAX_ENTRIES_PER_SLOT=3` cumulative
-2. Per-symbol blacklist: 3 loss berturut-turut → pause symbol 4 jam (wired di evaluate_exits + resolve_checker)
-3. Candle open delay: skip 5m awal candle (`UPDOWN_HOURLY_CANDLE_OPEN_MIN`)
-4. Volume ratio >= `UPDOWN_HOURLY_MIN_VOL_RATIO` (default 0.5, vs baseline 30m)
-5. Outcome price stagnation: skip kalau Polymarket price <0.5% range dalam 5m
-6. Min/max entry: `0.20 <= buy_price <= 0.45`
-7. Scalping signal gate (BTC): skip `WAIT_NOISE` / `WAIT_TREND` / km=0
-8. Market regime filter (`src/scout/regime.py`):
-   - Cross-asset: >=70% asset searah → +2
-   - HTF 1h+4h alignment → +1
-   - Session bias (US_OPEN) → +1
-   - Score >= 4 → SKIP (only when `USE_GBM=false`; GBM mode bypass)
-9. Liquidity check pre-entry (CLOB orderbook)
-10. **GBM mode bypasses momentum-window gating** (edge gate sudah handle)
+With `BASE_SIZE_PCT=0.08` and `MIN_POSITION_USDC=$3`, per-symbol differentiation is **active at SALDO_AWAL=$120**: BTC bets ~3.2× XRP. Only XRP clamps to the floor.
 
-**`gap_pct` recorded di DB**: GBM mode → realized edge (e.g. 0.08 = 8%); contrarian mode → BTC 15m momentum (legacy).
+## Strategy State (Interim, post-2026-05-23 refactor)
 
-**Sizing**:
+Flat probability mode. Bot trades based on hard filters + EV gate (implicit buy_price ≤ 0.48). No score-based confidence weighting. KellySizer still runs but its output is capped by the deterministic fixed-fractional sizer. Re-evaluate after ≥500 trades collected in this mode.
 
-- `buy_winrate = 0.33` hardcoded (historical WR baseline; GBM path archived 2026-05-12). Placeholder di `context.py` sampai per-signal winrate model dibuat — update manual tiap ~100 trade.
-- Kelly bet x `kelly_multiplier` (0.5/0.75/1.0 dari ATR vs ATR_avg; x1.2 mom aligned, x0.75 mom opposed)
-- Asia session: cap kelly_multiplier ke 0.7
+## Known Issues (verified from code, not folklore)
 
----
+- **In-memory amnesia**: slot counter, symbol blacklist, stagnation tracker, profit-locked-markets, flip-queue all live in dict() globals or loop locals — wiped on every restart. Reentry guards and "3-loss blacklist" do NOT survive process restart.
+- **No fill confirmation**: `clob_client.py:111` `pasang_order` treats `resp.get("orderID")` truthy as success. No FILLED-status polling; partial fills not handled.
+- **Config divergence (remaining)**: `MAX_SAME_DIRECTION`, `HOURLY_LOCK_T2_PCT`, `HOURLY_FLIP_TRIGGER_PCT`, `POLLING_INTERVAL_DETIK` still differ between `.env.example` and `config.py` defaults — env wins at runtime.
+- **CANDLE_ENABLED=false but file still imports**: `execute/candle.py` imports many modules unconditionally; turning the flag on would surface bit-rot.
+- **Comment vs code mismatch**: `STRATEGY_MISTAKES.md` and several inline comments describe a "contrarian" strategy; current `DirectionalDecisionFilter` (`filters/signal.py:92-97`) is **momentum-following**.
+- **Pydantic dep orphaned (2026-05-23)**: `requirements.txt` keeps `pydantic>=2.0.0` but the only user (`models/scout.py`) was deleted. Left in place — out of scope to remove.
+- **4 async tests in `test_scout_filters.py` fail** without pytest-asyncio plugin (pre-existing, unrelated to refactor).
 
-## Exit Strategy untuk Hourly (`src/execute/exit.py`)
-
-**Asimetris: profit lock cepat, SL hanya di akhir.**
-
-### Profit Lock
-
-| Tier | PnL trigger | Time gate  |
-| ---- | ----------- | ---------- |
-| T1   | >= 80%      | > 5m left  |
-| T2   | >= 50%      | > 15m left |
-
-Selain itu → HOLD ke resolve untuk full payout.
-
-**Exit alerts**: setiap exit kirim `alert_exit` ke Telegram + `log.info [EXIT]`.
-Format: `[EXIT] {SIGNAL} — {question} | {outcome} @ entry→exit | PnL $X`
-
-### Late-Stage SL
-
-| Band   | Time range  | Threshold   |
-| ------ | ----------- | ----------- |
-| OUTER  | 10–20m left | PnL <= -30% |
-| MIDDLE | 5–10m left  | PnL <= -50% |
-| INNER  | 0–5m left   | PnL <= -70% |
-
-> 20m left → NO SL (kasih ruang recovery).
-
----
-
-## Re-entry After Take-Profit
-
-### Same-direction (`src/execute/reentry.py`)
-
-1. Drop >= 30% dari exit_price
-2. Fair value > current_price + fee + 5% edge
-3. Orderbook: spread <= 5%, liquidity cukup
-4. Time gate: >= 15m to resolve
-5. Slot cumulative cap belum penuh
-   → Re-entry @ **half size**.
-
-### Opposite-direction (`src/scout/gbm.py:passes_opposite_reentry_gate`)
-
-1. `UPDOWN_HOURLY_OPPOSITE_REENTRY=true`
-2. Time floor: >= `UPDOWN_HOURLY_OPPOSITE_MIN_MINUTES` (default 10m)
-3. GBM decision.outcome != locked_outcome
-4. Standard GBM edge gate tetap apply
-5. Slot cumulative cap tetap apply
-
----
-
-## Risk Manager
-
-- 2+ consecutive losses → cap **$10**
-- 3+ consecutive wins → cap **$30**
-- Default → **$20**
-- `MAX_SAME_DIRECTION=2`, `MAX_POSITIONS_PER_SLOT=2`, `MAX_OPEN_POSITIONS=5`
-
----
-
-## Circuit Breaker (`data/circuit_breaker.json`)
-
-**`CB_ENABLED=False` untuk paper trade phase.**
-
-- Saklar 1: daily loss > 20% → pause sampai besok (auto-reset)
-- Saklar 2: 5x consecutive loss → pause (manual reset)
-- Saklar 3: drawdown > 40% → emergency stop (manual reset)
-
-**Manual reset** — edit `data/circuit_breaker.json`:
-
-```json
-{
-  "starting_capital": 120.0,
-  "current_capital": <nilai sekarang>,
-  "daily_loss": 0.0,
-  "consecutive_losses": 0,
-  "saklar_2_triggered": false,
-  "saklar_3_triggered": false
-}
-```
-
-`starting_capital` SELALU = 120 (SALDO_AWAL). CB hitung drawdown dari sini.
-
----
-
-## Tests
+## Dev Workflow
 
 ```bash
-pytest tests/ -q --tb=short --ignore=tests/test_async_binance.py
+# Run (DRY_RUN default = paper trade)
+python -m src.main
+
+# Tests (94 collected)
+pytest tests/ -q --tb=short
+
+# Backtest filter-rejection analysis (NOT predicted PnL)
+python -m script.backtest
+python -m script.backtest_filter
+
+# Live monitor (stdout)
+python -m script.monitor
+
+# Telegram interactive bot
+python -m script.monitor_bot
+
+# Force-close all open positions
+echo "" > data/tarik.flag       # or comma-separated condition IDs
 ```
 
-Tests dikosongkan saat refactor. Tulis ulang setelah strategy stabil.
-Pre-existing failures: `test_async_binance.py` (14 tests, unrelated).
+Env vars required for LIVE only (`config.py:133-144`): `PK_PRIVATE_KEY`, `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASS`. DRY_RUN runs with zero credentials.
 
-## STRATEGY AUDIT: CONTRARIAN MISALIGNMENT
+Optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
-### 1. Performa Kolektif (Total Loss: -$37.03 | WR: 20%)
+## Workflow Rule: Strategy Changes Backtest First
 
-- **Hourly Contrarian:** 7 Trades | 2W / 5L (WR 29%) | **PnL: -$29.02**
-- **Candle Scalper:** 3 Trades | 0W / 3L (WR 0%) | **PnL: -$8.01**
-- _Note: Logika Candle mirip dengan Hourly (bet against 15m momentum), sehingga menghasilkan win-rate hancur yang sama._
+Logic changes (filters, sizing, exit thresholds): backtest → 7d DRY_RUN → LIVE. Config-only changes that tighten risk may skip backtest. Loosening any risk param → backtest required. Anti-pattern: shipping new logic straight to DRY_RUN to "see what happens."
 
-### 2. Root Cause Analisis (Jebakan Pasar Trending)
+Token-saving (CRITICAL): no filler, no re-reads, diff-only edits, pipe terminals through `| Select-Object -Last 50`.
 
-- **Thesis Bot:** Menggunakan prinsip _Mean Reversion_ (bertaruh harga pasti kembali ke rata-rata setelah jenuh). Bot mendeteksi koin turun selama 15 menit, lalu mengeksekusi aksi **Buy Up** dengan harga murah (kisaran $0.25 - $0.41).
-- **Miskalkulasi Fatal:** Kondisi pasar aktual sedang mengalami sentimen bearish yang masif (**Strong Trend Continuation / Crypto Bear Sentiment**). Bukannya berbalik arah (_reverse_), pasar justru terus melongsor turun kebawah secara agresif (SOL runtuh ke $0.04, BTC ambrol ke $0.01).
-- **Arah Taruhan Kontrarian:**
-  - **Buy Up:** 6 Trades | 2W | **PnL: -$26.83** (Sangat boncos akibat menangkap pisau jatuh)
-  - **Buy Down:** 1 Trade | 0W | **PnL: -$2.19**
+## Things NOT True Anymore (purge from memory)
 
-### 3. Status Sistem Saat Ini
-
-- **Exit Logic:** ✅ **WORKING PERFECTLY**. Semua posisi _loss_ berhasil di-cut secara disiplin oleh kombinasi mekanik `exit_timeout` (Candle 5m limit) dan `catastrophic SL` (T2/T4 bands), sehingga modal aman dari risiko amblas total ke $0.
+- ❌ "GBM probability model is primary" → ✅ GBM toggle removed from `.env.example`; momentum-sign is the only directional signal (`filters/signal.py:92`). `UPDOWN_HOURLY_USE_GBM` not in `config.py`.
+- ❌ "Strategy is contrarian (bet against 15m momentum)" → ✅ Code bets WITH the 15m sign (`filters/signal.py:92-97`). `strategy_mode = "updown_hourly_momentum"`.
+- ❌ "`gap_pct` = GBM realized edge" → ✅ Stored as `abs(btc_regime or 0.0)` (`updown_hourly.py:96`) — BTC's own 15m momentum magnitude, no longer edge-related.
+- ❌ "`buy_winrate = 0.33` hardcoded placeholder" → ✅ `scout/probability.py:39` `calculate_winrate` returns score-based 0.20–0.80 from 6 signals.
+- ❌ "Daily crypto + Up/Down daily strategies active" → ✅ Only `run_hourly_updown_mode` is wired in `main.py:33`. Daily-strategy classes still exist in `exit.py` but unused.
+- ❌ "Candle scalper / reentry / opposite-flip / GBM all active" → ✅ All gated off (`CANDLE_ENABLED=false`, `HOURLY_FLIP_ENABLED=false`); `execute/reentry.py` only callable from `candle.py`.
+- ❌ "`buy_winrate=0.33` documented as historical baseline" → ✅ Removed; winrate now per-trade from probability model.
+- ❌ "`UPDOWN_HOURLY_USE_GBM=false` fallback to contrarian" → ✅ Toggle gone, only momentum path remains.
+- ❌ "`buy_winrate` placeholder in context.py" → ✅ `ScoutContext.buy_winrate` is set live in `DirectionalDecisionFilter.evaluate` (`filters/signal.py:108`).
+- ❌ "Re-entry after take-profit (same-direction half-size, opposite-direction GBM)" → ✅ Both paths removed from source; only `_profit_locked_markets` dict (loop local) is consulted by `ProfitLockedFilter`.
+- ❌ "Risk manager caps: 2 losses → $10, 3 wins → $30, default $20" → ✅ Now percent-based via `RISK_BASE_SIZE_PCT=0.15`, `_MIN=0.08`, `_MAX=0.40` (`risk/manager.py:43`).
+- ❌ "GBM-mode bypasses momentum-window gating" → ✅ No GBM mode exists.
+- ❌ "MAX_POSITIONS_PER_SLOT=2, MAX_OPEN_POSITIONS=5" → ✅ Now 5 and 10 respectively.
+- ❌ "SCORE_TO_PROB 6-bin lookup drives winrate" → ✅ flat 0.50, probability claim dropped (interim, see 2026-05-23 refactor; `scout/probability.py`).
+- ❌ "Half-Kelly sizing × 0.7 multiplier is the sizer" → ✅ fixed-fractional 5% capital × per-symbol multiplier (`risk/manager.py`). KellySizer still instantiated but its bet is capped by the new sizer.
+- ❌ "`MAX_CAPITAL_PER_MARKET` shadowed di `position.py:26`" → ✅ single source: `config.py` only. Module constants removed.
+- ❌ "`HOURLY_MAX_ENTRIES_PER_SLOT = 8` hardcoded di `slots.py:6`" → ✅ constant removed; 3 callers updated to read `config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT` directly.
+- ❌ "`loop.py:46,50,70,71` getattr fallbacks drift from config defaults (0.52, 30.0, 0.30, 0.10)" → ✅ aligned to (0.15, 75.0, 0.40, 0.20).
+- ❌ "`src/_archive/circuit.py` imported live from arsip path" → ✅ moved to `src/risk/circuit.py`; `_archive/` folder removed.
+- ❌ "`models/scout.py` `ScoutSignal` orphan" → ✅ deleted.
+- ❌ "`google-genai` declared but zero usage" → ✅ removed from `requirements.txt`.
+- ❌ "Bot enters at any price within `[MIN_ENTRY, MAX_ENTRY]` band" → ✅ additional `EvGateFilter` rejects `buy_price > buy_winrate − EV_GATE_MIN_MARGIN`. With flat 0.50 winrate, effective cap is 0.48.
+- ❌ "BASE_SIZE_PCT=0.05 + MIN=$10 floor (all symbols clamp at $120 capital)" → ✅ 0.08 + MIN=$3 (per-symbol differentiation active at $120: BTC $9.60, XRP $3.00).
