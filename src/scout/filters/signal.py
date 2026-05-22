@@ -14,8 +14,8 @@ class MinMomentumFilter(Filter):
             return FilterResult.fail("no momentum data")
         sym_15m = ctx.sym_mtf["m_15m"]
         vol_15m = ctx.vol_annual / (252 * 96) ** 0.5
-        mom_min = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MIN", 0.0015)
-        mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.75)
+        mom_min = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MIN", 0.0010)
+        mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.49)
         thr = max(mom_min, vol_15m * mom_factor)
         if abs(sym_15m) < thr:
             return FilterResult.fail(
@@ -275,7 +275,7 @@ class EvGateFilter(Filter):
         from src.utils.config import config
         if not getattr(config, "EV_GATE_ENABLED", True):
             return FilterResult.pass_(reason="filter_disabled")
-        margin = float(getattr(config, "EV_GATE_MIN_MARGIN", 0.02))
+        margin = float(getattr(config, "EV_GATE_MIN_MARGIN", -0.05))
         threshold = float(ctx.buy_winrate) - margin
         if ctx.buy_price > threshold:
             return FilterResult.fail(

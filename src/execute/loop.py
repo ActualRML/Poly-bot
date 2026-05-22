@@ -92,8 +92,10 @@ async def run_hourly_updown_mode(clob: ClobClient):
         f"MAX_POSITIONS_PER_SLOT={config.MAX_POSITIONS_PER_SLOT} "
         f"MAX_ENTRIES_PER_SLOT={config.UPDOWN_HOURLY_MAX_ENTRIES_PER_SLOT} "
         f"BASE_SIZE_PCT={_BASE_SIZE_PCT} MIN_POSITION_USDC={_MIN_POS} "
+        f"MOM_MIN={config.UPDOWN_HOURLY_MOMENTUM_MIN} "
+        f"MOM_VOL_FACTOR={config.UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR} "
         f"EV_GATE_ENABLED={getattr(config, 'EV_GATE_ENABLED', True)} "
-        f"EV_GATE_MIN_MARGIN={getattr(config, 'EV_GATE_MIN_MARGIN', 0.02)}"
+        f"EV_GATE_MIN_MARGIN={getattr(config, 'EV_GATE_MIN_MARGIN', -0.05)}"
     )
 
     async with aiohttp.ClientSession() as session:

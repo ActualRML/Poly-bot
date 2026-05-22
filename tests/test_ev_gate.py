@@ -1,9 +1,12 @@
 """
 Tests for EvGateFilter (2026-05-23 refactor).
 
-With flat winrate=0.50 and default EV_GATE_MIN_MARGIN=0.02, threshold=0.48.
-Reject when buy_price > 0.48.
+The runtime EV_GATE_MIN_MARGIN can be overridden by .env.local at runtime,
+so tests pin the margin explicitly via monkeypatch instead of relying on the
+config default. This decouples test correctness from operator env files.
 """
+import pytest
+
 from src.scout.filters.signal import EvGateFilter
 
 
@@ -14,31 +17,45 @@ class _Ctx:
         self.buy_winrate = buy_winrate
 
 
-def test_rejects_expensive_buy_price():
+@pytest.fixture
+def loose_margin(monkeypatch):
+    """Pin margin=-0.05 → threshold = 0.50 - (-0.05) = 0.55."""
+    from src.utils import config as cfgmod
+    monkeypatch.setattr(cfgmod.config, "EV_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr(cfgmod.config, "EV_GATE_MIN_MARGIN", -0.05, raising=False)
+
+
+def test_rejects_expensive_buy_price(loose_margin):
     f = EvGateFilter()
-    result = f.evaluate(_Ctx(buy_price=0.55))
+    result = f.evaluate(_Ctx(buy_price=0.60))
     assert result.passed is False
     assert "no edge" in result.reason
 
 
-def test_rejects_at_boundary_plus_epsilon():
+def test_rejects_at_boundary_plus_epsilon(loose_margin):
+    # 0.50 winrate - (-0.05) margin = 0.55 threshold; 0.551 > 0.55 → reject
     f = EvGateFilter()
-    # 0.50 winrate - 0.02 margin = 0.48 threshold; 0.481 > 0.48 → reject
-    result = f.evaluate(_Ctx(buy_price=0.481))
+    result = f.evaluate(_Ctx(buy_price=0.551))
     assert result.passed is False
 
 
-def test_accepts_cheap_buy_price():
+def test_accepts_cheap_buy_price(loose_margin):
     f = EvGateFilter()
     result = f.evaluate(_Ctx(buy_price=0.40))
     assert result.passed is True
 
 
-def test_accepts_at_threshold():
+def test_accepts_at_threshold(loose_margin):
+    # 0.55 is NOT > 0.55 → passes
     f = EvGateFilter()
-    # 0.48 is NOT > 0.48 → passes
-    result = f.evaluate(_Ctx(buy_price=0.48))
+    result = f.evaluate(_Ctx(buy_price=0.55))
     assert result.passed is True
+
+
+def test_accepts_old_tight_band_value(loose_margin):
+    """Regression: 0.50 used to be the threshold-area; now well inside band."""
+    f = EvGateFilter()
+    assert f.evaluate(_Ctx(buy_price=0.50)).passed is True
 
 
 def test_disabled_flag_passes_everything(monkeypatch):
