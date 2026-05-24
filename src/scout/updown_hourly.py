@@ -48,7 +48,6 @@ async def analyze_updown_hourly_market(
     if ctx is None:
         return
 
-    ctx.sizer   = sizer
     ctx.gamma   = gamma
     ctx.clob    = clob
     ctx.manager = manager

@@ -1,4 +1,6 @@
 import logging
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -8,7 +10,21 @@ MAX_STOP_FRACTION: float    = 0.45
 
 MIN_POSITION_USDC: float    = 3.0
 MAX_POSITION_USDC: float    = 75.0
+# Dead-code fallback: only returned by calculate_position_size when capital<=0.
+# Live path always has capital>0, so this value never reaches a real order.
 BASE_POSITION_USDC: float   = 30.0
+
+
+@dataclass
+class SizingResult:
+    """Minimal sizing result for the live entry path (replaces KellyResult).
+    Field names match the legacy KellyResult shape so downstream code that
+    reads ctx.kelly.bet_usdc / .shares / .bet_fraction / .expected_value
+    keeps working without changes."""
+    bet_usdc: Decimal
+    shares: Decimal
+    bet_fraction: Decimal
+    expected_value: Decimal
 
 # Interim sizing (2026-05-23 refactor): fixed-fractional per-symbol.
 # Replaces 5-trade streak heuristic + Kelly half-bet. Deterministic.

@@ -55,7 +55,9 @@ class ScoutContext:
     event_horizon: Optional[dict] = None
     market_state: Optional[dict] = None
 
-    sizer: Any = None
+    # sizer: dropped 2026-05-24 — KellySizer removed from live path. SizingFilter
+    # now calls calculate_position_size directly. Kept removed (not retained as
+    # legacy field) to surface accidental KellySizer reintroductions as AttributeError.
     gamma: Any = None
     clob: Any = None
     manager: Any = None

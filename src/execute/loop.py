@@ -8,7 +8,6 @@ from decimal import Decimal
 import aiohttp
 
 from src.api.gamma_client import GammaClient
-from src.risk.kelly import KellySizer
 from src.execute.exit import ExitEvaluator
 from src.execute.position import PositionManager
 from src.risk.circuit import CircuitBreaker
@@ -17,7 +16,7 @@ from src.models.database import log_prediction, get_recent_closed_pnls
 from src.utils.config import config
 from src.utils.logger import log
 from src.utils.telegram_alert import init_telegram, get_alert
-from src.risk.manager import get_dynamic_stop_loss, calculate_position_size
+from src.risk.manager import get_dynamic_stop_loss
 from src.execute.candle import scan_candle_markets, analyze_candle_market
 from src.risk.slots import (
     slot_history_count, record_slot_entry, cleanup_old_slots,
@@ -37,12 +36,9 @@ logger = logging.getLogger(__name__)
 
 async def run_hourly_updown_mode(clob: ClobClient):
     gamma   = GammaClient(host=getattr(config, "GAMMA_HOST", "https://gamma-api.polymarket.com"))
-    sizer   = KellySizer(
-        kelly_multiplier = getattr(config, "KELLY_MULTIPLIER", 0.7),
-        max_fraction     = getattr(config, "MAX_KELLY_FRACTION", 0.25),
-        min_bet_usdc     = getattr(config, "MIN_BET_USDC", 5.0),
-        min_winrate      = getattr(config, "MIN_WINRATE", 0.15),
-    )
+    # KellySizer fully removed from live path (2026-05-24). Sizing now driven
+    # by fixed-fractional calculate_position_size inside SizingFilter.
+    sizer   = None
     manager = PositionManager(
         max_open_positions     = getattr(config, "MAX_OPEN_POSITIONS", 10),
         max_capital_per_market = getattr(config, "MAX_CAPITAL_PER_MARKET", 75.0),
@@ -85,8 +81,6 @@ async def run_hourly_updown_mode(clob: ClobClient):
         "[CONFIG] "
         f"DRY_RUN={config.DRY_RUN} CB_ENABLED={config.CB_ENABLED} "
         f"SALDO_AWAL={float(config.SALDO_AWAL)} "
-        f"MIN_WINRATE={config.MIN_WINRATE} "
-        f"KELLY_MULT={config.KELLY_MULTIPLIER} MAX_KELLY_FRAC={config.MAX_KELLY_FRACTION} "
         f"MAX_CAPITAL_PER_MARKET={config.MAX_CAPITAL_PER_MARKET} "
         f"MAX_OPEN_POSITIONS={config.MAX_OPEN_POSITIONS} "
         f"MAX_POSITIONS_PER_SLOT={config.MAX_POSITIONS_PER_SLOT} "

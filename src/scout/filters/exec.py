@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace as _dc_replace
 from decimal import Decimal
 
 from src.scout.context import ScoutContext
@@ -10,30 +9,31 @@ from src.scout.result import FilterResult
 
 class SizingFilter(Filter):
     """
-    Compute Kelly bet for ctx.buy_outcome / buy_price / buy_winrate.
-    Apply scalp kelly multiplier, momentum alignment, session cap, vol-state
-    scale, then position-size cap. Stores final result on
-    ctx.kelly and ctx.scalp_kelly_mult.
-    Fails if Kelly is not positive-EV or final bet ≤ 0.
+    Fixed-fractional per-symbol sizing (2026-05-24 refactor).
+
+    Primary bet size comes from calculate_position_size(capital, symbol).
+    Scalp/session/vol-state multipliers scale the base size down. EV is
+    handled upstream by EvGateFilter; no Kelly EV check here.
+
+    Stores result on ctx.kelly (legacy attribute name; the object is a
+    SizingResult with the same field shape KellyResult had, so downstream
+    consumers in updown_hourly.py and other exec filters keep working).
+
+    Fails if final bet < MIN_POSITION_USDC after multiplier scaling.
     """
 
     name = "sizing"
 
     def evaluate(self, ctx: ScoutContext) -> FilterResult:
         from src.utils.config import config
-        from src.risk.manager import calculate_position_size
-        from src.models.database import get_recent_closed_pnls
-
-        if ctx.sizer is None:
-            return FilterResult.fail("no sizer in context")
-
-        kelly = ctx.sizer.calculate(
-            winrate      = ctx.buy_winrate,
-            market_price = ctx.buy_price,
-            capital      = ctx.capital,
+        from src.risk.manager import (
+            calculate_position_size, MIN_POSITION_USDC, SizingResult,
         )
-        if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
-            return FilterResult.fail(f"kelly skip: {kelly.reason}")
+
+        base_size = calculate_position_size(
+            capital=float(ctx.capital),
+            symbol=ctx.symbol,
+        )
 
         scalp_mult = 1.0
         if ctx.btc_scalp is not None:
@@ -63,35 +63,31 @@ class SizingFilter(Filter):
             if vol_km < 1.0:
                 scalp_mult = min(scalp_mult, vol_km)
 
-        max_size = calculate_position_size(
-            get_recent_closed_pnls(limit=5),
-            capital=float(ctx.capital),
-            symbol=ctx.symbol,
+        final_usdc = round(base_size * scalp_mult, 2)
+        if final_usdc < MIN_POSITION_USDC:
+            return FilterResult.fail(
+                f"size ${final_usdc:.2f} below min ${MIN_POSITION_USDC:.2f} "
+                f"(base ${base_size:.2f} × mult {scalp_mult:.2f})"
+            )
+
+        bet_usdc = Decimal(str(final_usdc))
+        shares   = (bet_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
+        cap_dec  = Decimal(str(float(ctx.capital)))
+        bet_frac = (bet_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
+        # expected_value here is a display metric for the Telegram alert,
+        # not a gate: flat winrate (0.50) minus actual buy_price.
+        ev = Decimal(str(round(float(ctx.buy_winrate) - float(ctx.buy_price), 4)))
+
+        ctx.kelly = SizingResult(
+            bet_usdc=bet_usdc,
+            shares=shares,
+            bet_fraction=bet_frac,
+            expected_value=ev,
         )
-        cap_dec = Decimal(str(float(ctx.capital)))
-        if float(kelly.bet_usdc) > max_size:
-            capped_usdc   = Decimal(str(max_size))
-            capped_shares = (capped_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            capped_frac   = (capped_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
-            kelly = _dc_replace(
-                kelly, bet_usdc=capped_usdc, shares=capped_shares, bet_fraction=capped_frac
-            )
-
-        if scalp_mult < 1.0:
-            scaled_usdc   = Decimal(str(round(float(kelly.bet_usdc) * scalp_mult, 2)))
-            scaled_shares = (scaled_usdc / Decimal(str(ctx.buy_price))).quantize(Decimal("0.0001"))
-            scaled_frac   = (scaled_usdc / cap_dec) if cap_dec > 0 else Decimal("0")
-            kelly = _dc_replace(
-                kelly, bet_usdc=scaled_usdc, shares=scaled_shares, bet_fraction=scaled_frac
-            )
-            if float(kelly.bet_usdc) <= 0:
-                return FilterResult.fail("bet → 0 after vol/session scaling")
-
-        ctx.kelly = kelly
         ctx.scalp_kelly_mult = scalp_mult
         return FilterResult.pass_(
-            reason=f"bet=${float(kelly.bet_usdc):.2f} km={scalp_mult:.2f}",
-            value={"bet_usdc": float(kelly.bet_usdc), "km": scalp_mult},
+            reason=f"bet=${float(bet_usdc):.2f} km={scalp_mult:.2f}",
+            value={"bet_usdc": float(bet_usdc), "km": scalp_mult},
         )
 
 

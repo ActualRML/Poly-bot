@@ -329,6 +329,8 @@ async def analyze_candle_market(
     if not kelly.is_positive_ev or float(kelly.bet_usdc) <= 0:
         return
 
+    # FIXME (2026-05-24): missing capital + symbol args → falls back to
+    # BASE_POSITION_USDC and DEFAULT_SYMBOL_MULT. Fix when CANDLE_ENABLED.
     max_size = calculate_position_size(get_recent_closed_pnls(limit=5))
     effective_max = max_size * 0.5 if is_half_size else max_size
     if float(kelly.bet_usdc) > effective_max:

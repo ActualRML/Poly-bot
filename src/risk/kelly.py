@@ -1,11 +1,11 @@
 """
-DEPRECATED (2026-05-23): Kelly sizing replaced by fixed-fractional in
-risk/manager.py. File retained untuk reference & potential revival.
+DEPRECATED (2026-05-24): KellySizer fully removed from live path. The
+SizingFilter (src/scout/filters/exec.py) now calls calculate_position_size
+directly, and loop.py no longer instantiates KellySizer. EV gating lives
+solely in EvGateFilter (src/scout/filters/signal.py).
 
-KellySizer.calculate() still runs and returns a positive bet (used by
-SizingFilter), but its output is now capped by calculate_position_size
-which is the binding sizer. With flat winrate=0.50 the Kelly raw bet is
-small and the cap is what matters.
+File retained as reference. NO callers in production code. Imports of
+this module are a smell — verify before adding any.
 """
 
 import logging as _logging
@@ -25,9 +25,10 @@ def _warn_kelly_use(caller: str) -> None:
         return
     _kelly_import_warned = True
     _logger.warning(
-        f"[KELLY DEPRECATED] {caller} imports kelly.py — sizing now driven "
-        "by risk/manager.calculate_position_size (fixed-fractional). "
-        "KellySizer kept for compat; output is capped downstream."
+        f"[KELLY DEPRECATED] {caller} imports kelly.py — KellySizer was fully "
+        "removed from the live path on 2026-05-24. Sizing is now driven by "
+        "calculate_position_size (fixed-fractional). Re-introducing Kelly into "
+        "scout filters or loop.py is a regression — verify intent."
     )
 
 
