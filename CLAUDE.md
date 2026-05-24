@@ -83,7 +83,7 @@ Data flow: `scan_updown_hourly_markets` → `ScoutCycleGate.evaluate` → `analy
 | `UPDOWN_HOURLY_MIN_T_MINUTES` | 20 | entry time-floor |
 | `UPDOWN_HOURLY_MIN_ENTRY_PRICE` / `_MAX_ENTRY_PRICE` | 0.25 / 0.65 | price band |
 | `UPDOWN_HOURLY_MOMENTUM_MIN` | 0.0010 | thr = max(MIN, vol_15m × VOL_FACTOR); loosened 2026-05-23 |
-| `UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR` | 0.49 | was 0.75; cut ~35% for faster paper-trade sampling |
+| `UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR` | 0.34 | was 0.75 → 0.49 → 0.34 (cumulative ~55% cut for paper-trade sampling) |
 | `EV_GATE_ENABLED` | True | reject `buy_price > winrate − margin` |
 | `EV_GATE_MIN_MARGIN` | -0.05 | with flat winrate=0.50 → threshold 0.55 (loosened 2026-05-23 for sampling) |
 | `HOURLY_LOCK_T1_PCT` / `_T2_PCT` | 80 / 50 | .env.example T2=70 (DIVERGES) |

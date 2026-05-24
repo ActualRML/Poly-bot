@@ -15,7 +15,7 @@ class MinMomentumFilter(Filter):
         sym_15m = ctx.sym_mtf["m_15m"]
         vol_15m = ctx.vol_annual / (252 * 96) ** 0.5
         mom_min = getattr(config, "UPDOWN_HOURLY_MOMENTUM_MIN", 0.0010)
-        mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.49)
+        mom_factor = getattr(config, "UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR", 0.34)
         thr = max(mom_min, vol_15m * mom_factor)
         if abs(sym_15m) < thr:
             return FilterResult.fail(
