@@ -45,6 +45,7 @@ Data flow: `scan_updown_hourly_markets` → `ScoutCycleGate.evaluate` → `analy
 | Feature | Flag | Default | Code path | Status |
 |---|---|---|---|---|
 | Hourly momentum entry | — | always on | `loop.py:702` | ACTIVE |
+| Profit-locked re-entry block | — (registration) | — | `filters/precheck.py:94` (commented) | **DISABLED 2026-05-23** (allow re-entry after TP) |
 | Flash-crash hard skip | `FLASH_CRASH_HARD_SKIP` | True | `cycle.py:65` | ACTIVE |
 | Anytime TP at +150% | `UPDOWN_HOURLY_LOCK_ANYTIME_PCT` | 150.0 | `exit.py:331` | ACTIVE |
 | Candle 1h-resolve strategy | `CANDLE_ENABLED` | False | `execute/candle.py` | DISABLED (file loaded) |
@@ -183,3 +184,4 @@ Token-saving (CRITICAL): no filler, no re-reads, diff-only edits, pipe terminals
 - ❌ "`google-genai` declared but zero usage" → ✅ removed from `requirements.txt`.
 - ❌ "Bot enters at any price within `[MIN_ENTRY, MAX_ENTRY]` band" → ✅ additional `EvGateFilter` rejects `buy_price > buy_winrate − EV_GATE_MIN_MARGIN`. With flat 0.50 winrate, effective cap is 0.48.
 - ❌ "BASE_SIZE_PCT=0.05 + MIN=$10 floor (all symbols clamp at $120 capital)" → ✅ 0.08 + MIN=$3 (per-symbol differentiation active at $120: BTC $9.60, XRP $3.00).
+- ❌ "ProfitLockedFilter blocks re-entry permanently after TP exit" → ✅ filter unregistered from chain (`precheck.py:94` commented); bot re-scouts market next cycle via standard pipeline; `AlreadyClosedFilter` still blocks double-entry same-cycle; `_profit_locked_markets` dict kept populated for observability only.

@@ -91,7 +91,8 @@ class MomentumDataAvailableFilter(Filter):
 
 PRECHECK_FILTERS: list[Filter] = [
     AlreadyClosedFilter(),
-    ProfitLockedFilter(),
+    # disabled 2026-05-23: allow re-entry after TP, bot re-evaluates via standard pipeline
+    # ProfitLockedFilter(),
     CandleOpenDelayFilter(),
     MinTimeFloorFilter(),
     EventHorizonTierFilter(),

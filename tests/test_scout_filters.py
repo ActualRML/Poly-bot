@@ -119,9 +119,25 @@ def test_already_closed_pass_and_fail():
 
 
 def test_profit_locked_blocks_reentry():
+    """Class-behavior contract: filter still works if revived.
+    NOTE: ProfitLockedFilter disabled in chain since 2026-05-23
+    (see test_profit_locked_not_in_chain below)."""
     ctx = _make_ctx(profit_locked_markets={"0xabc": "Up"})
     r = ProfitLockedFilter().evaluate(ctx)
     assert not r.passed and "profit locked" in r.reason
+
+
+def test_profit_locked_not_in_chain():
+    """Regression: ProfitLockedFilter must NOT be registered in PRECHECK_FILTERS.
+    Disabled 2026-05-23 to allow re-entry after TP exit."""
+    from src.scout.filters.precheck import PRECHECK_FILTERS
+    names = [f.name for f in PRECHECK_FILTERS]
+    assert "profit_locked" not in names, (
+        f"ProfitLockedFilter is back in the chain — re-entry after TP will be blocked. "
+        f"Active precheck filters: {names}"
+    )
+    # AlreadyClosedFilter must remain (anti double-entry same cycle)
+    assert "already_closed" in names
 
 
 def test_candle_open_delay():
