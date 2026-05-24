@@ -93,7 +93,7 @@ class Config:
 
     UPDOWN_HOURLY_BTC_CORR_THR        : float = _get_float("UPDOWN_HOURLY_BTC_CORR_THR", 0.005)
     UPDOWN_HOURLY_MIN_VOL_RATIO       : float = _get_float("UPDOWN_HOURLY_MIN_VOL_RATIO", 0.35)
-    UPDOWN_HOURLY_MIN_VOLUME_USD      : float = _get_float("UPDOWN_HOURLY_MIN_VOLUME_USD", 500.0)
+    UPDOWN_HOURLY_MIN_VOLUME_USD      : float = _get_float("UPDOWN_HOURLY_MIN_VOLUME_USD", 100.0)
     UPDOWN_HOURLY_CONTRARIAN_MIN_T    : float = _get_float("UPDOWN_HOURLY_CONTRARIAN_MIN_T", 20.0)
     CANDLE_MIN_VOLUME_USD             : float = _get_float("CANDLE_MIN_VOLUME_USD", 500.0)
     CANDLE_UPDOWN_MOM_VOL_FACTOR      : float = _get_float("CANDLE_UPDOWN_MOM_VOL_FACTOR", 0.003)
