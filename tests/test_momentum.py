@@ -1,12 +1,13 @@
-"""momentum: the plug-and-play proof strategy.
+"""momentum: the moderate-favorite, trend-following strategy.
 
-momentum is a MIRROR of contrarian with the OPPOSITE side selection — same
-triggers (extreme zone + low_vol), same guards, same debounce, same entry-cost
-math — but it FOLLOWS the market (buys the expensive favorite) instead of fading
-it (buying the cheap underdog). These tests pin (a) the mirror is correct, (b)
-its params match contrarian's, and (c) it loads + registers through the existing
-machinery with zero plumbing. They touch ONLY momentum; contrarian's own tests
-in test_portfolio_void.py are left byte-for-byte unchanged.
+momentum triggers on the MODERATE zones (price_zone "high" -> buy YES, "low" ->
+buy NO), both requiring vol_regime "low_vol", and SKIPs the extreme zones. It is
+no longer a mirror of contrarian: the two now trade DISJOINT zones - momentum the
+moderate band, contrarian the extremes. These tests pin the high/low triggers and
+entry-cost math, that momentum no longer mirrors contrarian, that its params match
+the house knobs, and that it loads + registers through the existing machinery with
+zero plumbing. They touch ONLY momentum; contrarian's own tests in
+test_portfolio_void.py are left byte-for-byte unchanged.
 """
 from datetime import datetime, timezone
 
@@ -37,36 +38,55 @@ def _snap(price_zone, vol_regime, *, price, market_id="0xMKT"):
     )
 
 
-async def test_momentum_extreme_low_buys_no():
-    """extreme_low + low_vol: contrarian buys YES (cheap); momentum buys the
-    opposite, NO — the expensive favorite. entry = 1 - yes_price (the true cost)."""
+async def test_momentum_low_zone_buys_no():
+    """low zone + low_vol: NO is the favorite (YES 0.20-0.40), so momentum buys
+    NO. entry = 1 - yes_price (the true cost), landing in the moderate band."""
     from src.strategy.momentum import Plugin
 
-    d = await Plugin().evaluate(_snap("extreme_low", "low_vol", price=0.05))
+    d = await Plugin().evaluate(_snap("low", "low_vol", price=0.30))
     assert d.action is Action.BUY
-    assert d.side == "NO"                       # opposite of contrarian's "YES"
-    assert d.price == pytest.approx(0.95)       # NO costs 1 - 0.05 -> expensive side
+    assert d.side == "NO"                       # NO is the favorite in the low zone
+    assert d.price == pytest.approx(0.70)       # NO costs 1 - 0.30
 
 
-async def test_momentum_extreme_high_buys_yes():
-    """extreme_high + low_vol: contrarian buys NO (cheap); momentum buys YES."""
+async def test_momentum_high_zone_buys_yes():
+    """high zone + low_vol: YES is the favorite (0.60-0.80), so momentum buys
+    YES at the yes-price."""
     from src.strategy.momentum import Plugin
 
-    d = await Plugin().evaluate(_snap("extreme_high", "low_vol", price=0.95))
+    d = await Plugin().evaluate(_snap("high", "low_vol", price=0.70))
     assert d.action is Action.BUY
-    assert d.side == "YES"                       # opposite of contrarian's "NO"
-    assert d.price == pytest.approx(0.95)        # YES costs the yes-price -> expensive
+    assert d.side == "YES"                       # YES is the favorite in the high zone
+    assert d.price == pytest.approx(0.70)        # YES costs the yes-price
 
 
-async def test_momentum_is_exact_opposite_of_contrarian():
-    """The defining property of the mirror: same snapshot, opposite side."""
+async def test_momentum_no_longer_mirrors_contrarian():
+    """The OLD mirror invariant is gone: momentum and contrarian no longer
+    trigger on the SAME zone. Momentum now trades the moderate (high/low) zones
+    and SKIPs the extremes; contrarian still trades the extremes and SKIPs the
+    moderate zones - disjoint triggers, not mirror images."""
     from src.strategy.contrarian import Plugin as Contrarian
     from src.strategy.momentum import Plugin as Momentum
 
-    snap = _snap("extreme_low", "low_vol", price=0.05)
-    c = await Contrarian().evaluate(snap)   # separate instances -> independent debounce
-    m = await Momentum().evaluate(snap)
-    assert c.side == "YES" and m.side == "NO"
+    # Extreme zones: momentum now SKIPs; contrarian still acts.
+    ex_high = _snap("extreme_high", "low_vol", price=0.95)
+    assert (await Momentum().evaluate(ex_high)).action is Action.SKIP
+    assert (await Contrarian().evaluate(ex_high)).action is Action.BUY
+
+    ex_low = _snap("extreme_low", "low_vol", price=0.05)
+    assert (await Momentum().evaluate(ex_low)).action is Action.SKIP
+    assert (await Contrarian().evaluate(ex_low)).action is Action.BUY
+
+    # Moderate zones: momentum acts; contrarian SKIPs.
+    high = _snap("high", "low_vol", price=0.70)
+    m_high = await Momentum().evaluate(high)
+    assert m_high.action is Action.BUY and m_high.side == "YES"
+    assert (await Contrarian().evaluate(high)).action is Action.SKIP
+
+    low = _snap("low", "low_vol", price=0.30)
+    m_low = await Momentum().evaluate(low)
+    assert m_low.action is Action.BUY and m_low.side == "NO"
+    assert (await Contrarian().evaluate(low)).action is Action.SKIP
 
 
 async def test_momentum_skips_non_polymarket():
@@ -98,7 +118,7 @@ def test_momentum_params_pinned():
 
 
 def test_active_strategies_order_contrarian_first(monkeypatch, tmp_path):
-    """Activation order parses with contrarian FIRST — load-bearing, since the
+    """Activation order parses with contrarian FIRST - load-bearing, since the
     first-dispatched strategy wins is_held collisions on shared markets."""
     monkeypatch.chdir(tmp_path)  # clean cwd so the real .env.local can't leak in
     for k in ("PK_PRIVATE_KEY", "CLOB_API_KEY", "CLOB_SECRET", "CLOB_PASS"):

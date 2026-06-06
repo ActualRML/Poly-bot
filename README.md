@@ -31,6 +31,7 @@ uv run python -m src.main
 ```
 
 First-run behavior:
+
 1. Validates credentials, fails fast with a clear message if any are missing.
 2. Initializes SQLite at `data/bot.db` (creates the file + tables on first run).
 3. Loads strategies listed in `ACTIVE_STRATEGIES` (`noop` by default).
@@ -40,6 +41,7 @@ First-run behavior:
 No subscriptions are wired by default, so no market events flow — the bot idles on a live WS connection. Real strategies add their own subscriptions via `ws.subscribe(asset_ids=[...])`.
 
 Logs land in three places:
+
 - **stdout** — human-readable key/value
 - **`logs/bot.log`** — JSON, rotating (5 MB × 3)
 - **`logs/ws.log`** — JSON, rotating, WebSocket frames only (isolated so noisy connection storms don't drown the main log)
@@ -51,6 +53,7 @@ Stop with `Ctrl+C` — graceful shutdown closes the WS, flushes the DB, exits 0.
 Three steps. No core changes.
 
 1. Create `src/strategy/<name>.py`:
+
    ```python
    from src.strategy.base import Strategy
    from src.execute.decision import Decision, MarketSnapshot, Action
@@ -74,6 +77,7 @@ Three steps. No core changes.
    ```
 
 2. Register it in `.env`:
+
    ```
    ACTIVE_STRATEGIES=noop,<name>
    ```
@@ -101,7 +105,3 @@ tests/          Smoke + plugin contract tests.
 ```bash
 uv run pytest -q
 ```
-
-## Not built yet (intentionally)
-
-Backtesting, historical fetching, live execution, position tracking, PnL — these come once the foundation is shaken out. The point of this scaffold is the **WebSocket + plugin shape**, not the trading logic.
