@@ -59,7 +59,7 @@ async def _fetch_unrealized(open_rows) -> dict[int, float | None]:
     return out
 
 
-def main() -> None:
+def _dump() -> None:
     if not DB_PATH.exists():
         print(f"DB not found: {DB_PATH}")
         return
@@ -160,6 +160,10 @@ def main() -> None:
     print(f"  balance change:          {delta:+.2f}  ({delta / STARTING_BALANCE * 100:+.2f}%)")
 
     conn.close()
+
+
+def main() -> None:
+    _dump()
 
 
 if __name__ == "__main__":
