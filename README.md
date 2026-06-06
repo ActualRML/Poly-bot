@@ -1,125 +1,107 @@
-# Polymarket Trading Bot
+# polymarket-bot
 
-## Requirements
+Event-driven async Polymarket trading bot. WebSocket-first, plugin strategies, dry-run by default.
 
-- Python 3.11+
-- Dependencies:
+## Status
 
-```bash
-pip install -r requirements.txt
-```
+Foundation only — no real strategy logic yet. A `noop` placeholder proves the plugin pipeline end-to-end. Real strategies land in `src/strategy/` later.
 
-### Akun & API Keys yang dibutuhkan
-
-| Layanan    | Kebutuhan                                                    | Daftar                                                                   |
-| ---------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Polymarket | `PK_PRIVATE_KEY`, `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASS` | [polymarket.com](https://polymarket.com)                                 |
-| Telegram   | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`                     | [@BotFather](https://t.me/BotFather)                                     |
-| FRED       | `FRED_API_KEY`                                               | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
-
-> Binance dan CoinGecko dipakai sebagai price feed — tidak butuh API key.
-
-## Setup
-
-1. Copy `.env.example` ke `.env.secret` dan isi credentials:
+## Install
 
 ```bash
-cp .env.example .env.secret
+uv sync
 ```
 
-2. Copy `.env.example` ke `.env.local` dan sesuaikan strategy params (opsional):
+`uv` creates `.venv/` and installs everything pinned in `pyproject.toml` (deps + dev group).
+
+## Configure
 
 ```bash
-cp .env.example .env.local
+cp .env.example .env
 ```
 
-## Commands
+Fill in credentials, or keep them in `.env.secret` (already in `.gitignore`). Both files are loaded; `.env.secret` wins on conflict, real env vars win over both.
 
-### Run bot
+`DRY_RUN=true` is the default — the executor logs decisions but never places orders.
+
+## Run
 
 ```bash
-python -m src.main
+uv run python -m src.main
 ```
 
-### Monitor posisi live (stdout)
+First-run behavior:
+1. Validates credentials, fails fast with a clear message if any are missing.
+2. Initializes SQLite at `data/bot.db` (creates the file + tables on first run).
+3. Loads strategies listed in `ACTIVE_STRATEGIES` (`noop` by default).
+4. Opens the Polymarket WebSocket and starts a heartbeat task.
+5. Logs `strategy loaded strategy=noop` and `up ws_url=...`.
+
+No subscriptions are wired by default, so no market events flow — the bot idles on a live WS connection. Real strategies add their own subscriptions via `ws.subscribe(asset_ids=[...])`.
+
+Logs land in three places:
+- **stdout** — human-readable key/value
+- **`logs/bot.log`** — JSON, rotating (5 MB × 3)
+- **`logs/ws.log`** — JSON, rotating, WebSocket frames only (isolated so noisy connection storms don't drown the main log)
+
+Stop with `Ctrl+C` — graceful shutdown closes the WS, flushes the DB, exits 0.
+
+## Add a strategy
+
+Three steps. No core changes.
+
+1. Create `src/strategy/<name>.py`:
+   ```python
+   from src.strategy.base import Strategy
+   from src.execute.decision import Decision, MarketSnapshot, Action
+
+   class Plugin(Strategy):
+       name = "<name>"
+
+       async def evaluate(self, snapshot: MarketSnapshot) -> Decision:
+           # decide based on snapshot.event_type and snapshot.raw
+           if some_condition(snapshot):
+               return Decision(
+                   action=Action.BUY,
+                   strategy=self.name,
+                   side="YES",
+                   size_usdc=5.0,
+                   price=0.55,
+                   market_id=snapshot.market_id,
+                   reason="why",
+               )
+           return Decision.skip(strategy=self.name, reason="no signal")
+   ```
+
+2. Register it in `.env`:
+   ```
+   ACTIVE_STRATEGIES=noop,<name>
+   ```
+
+3. Re-run.
+
+**Hard rule**: strategies must NOT import from `src.api` or `src.data`. They receive a `MarketSnapshot`, they return a `Decision`. That isolation is what makes them unit-testable without mocks. If you need new data in a snapshot, add it to `MarketSnapshot` in `src/execute/decision.py` and populate it from the orchestrator — keep I/O out of the strategy layer.
+
+## Layout
+
+```
+src/
+  api/          Polymarket REST + WS, Binance REST. All network I/O.
+  data/         SQLite connection + schema. All disk I/O.
+  strategy/     Plugin strategies. Pure logic, no I/O.
+  execute/      Decision dataclass + dry-run executor.
+  monitor/      Structured logging + heartbeat.
+  config.py     pydantic-settings loader.
+  main.py       asyncio orchestrator.
+tests/          Smoke + plugin contract tests.
+```
+
+## Tests
 
 ```bash
-python -m script.monitor
+uv run pytest -q
 ```
 
-### Telegram interactive bot
+## Not built yet (intentionally)
 
-```bash
-python -m script.monitor_bot
-```
-
-Jalankan di terminal terpisah dari bot utama. Bot akan online dan siap menerima command dari Telegram.
-
-### Recalibrate model (BTC/ETH/SOL/BNB)
-
-```bash
-PYTHONIOENCODING=utf-8 python -m script.recalibrate
-```
-
-### Backtest manual per asset
-
-```bash
-PYTHONIOENCODING=utf-8 python -m script.backtest_mispricing --days 90 --asset BTC
-```
-
-> `PYTHONIOENCODING=utf-8` hanya diperlukan untuk script backtest/recalibrate.
-> `src.main` dan `script.monitor` sudah auto-reconfigure encoding.
-
-## Config
-
-| File          | Isi                                                      |
-| ------------- | -------------------------------------------------------- |
-| `.env.secret` | API keys, private key, Telegram token                    |
-| `.env.local`  | Strategy params (Kelly, threshold, circuit breaker, dll) |
-
-Set `DRY_RUN=True` di `.env.local` untuk paper trade (tidak ada order nyata).
-
-## MCP (Model Context Protocol)
-
-Project ini menggunakan [Ruflo](https://github.com/ruvnet/ruflo) sebagai MCP server untuk integrasi Claude Code.
-
-### Setup Ruflo
-
-Ruflo sudah dikonfigurasi di `.mcp.json` — tidak perlu setup manual. Pastikan Node.js terinstall, lalu jalankan Claude Code dari direktori project ini.
-
-```bash
-# Verifikasi konfigurasi MCP
-cat .mcp.json
-```
-
-MCP server Ruflo dijalankan otomatis via:
-
-```
-npx ruflo@latest mcp start
-```
-
-### Ruflo Plugins
-
-```
-/plugin marketplace add ruvnet/ruflo
-/plugin install ruflo-neural-trader@ruflo
-/plugin install ruflo-market-data@ruflo
-/plugin install ruflo-intelligence@ruflo
-```
-
-Commands (ketik di Telegram via `script.monitor_bot`):
-
-| Command | Keterangan |
-|---|---|
-| `/status` | Full report: portfolio + posisi + 5 trade terakhir |
-| `/positions` | List posisi open **bernomor** (gunakan nomor untuk /tarik) |
-| `/stats` | Summary: total trades, winrate, PnL |
-| `/trades` | 10 trades terakhir |
-| `/trades 25` | N trades terakhir (max 50) |
-| `/tarik 1` | Tutup posisi nomor 1 (profit atau rugi) |
-| `/tarik 1 3` | Tutup posisi nomor 1 dan 3 sekaligus |
-| `/tarik` | Tutup semua posisi open |
-| `/ping` | Cek bot alive + jumlah posisi open |
-| `/help` | List semua command |
-
-> `/tarik` dieksekusi oleh bot utama di cycle berikutnya (~30 detik). Cek `/positions` dulu untuk tahu nomor masing-masing posisi.
+Backtesting, historical fetching, live execution, position tracking, PnL — these come once the foundation is shaken out. The point of this scaffold is the **WebSocket + plugin shape**, not the trading logic.

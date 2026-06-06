@@ -1,51 +1,31 @@
-# Ignore environment variables
-.env
-.env.*
-.env.secret
-*.secret
-!.env.example
-
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 
-# Virtualenv
-venv/
+# uv / virtualenvs
 .venv/
-env/
+venv/
+uv.lock
 
-# Database & state
-data/*.db
-data/*.db.bak.*
-data/*.db.bak_*
-data/circuit_breaker.json
-data/circuit_breaker.json.bak.*
-data/historical/
-data/backtest_cache/
-data/backtest_results/
-data/whitelist_candidates.csv
-data/.kalshi_cache.json
-data/.*_cache.json
+# Secrets / local env
+.env
+.env.secret
+.env.local
 
-# Claude Code local config (per-machine)
-.claude/settings.local.json
+# Runtime artifacts (project-root only — do not match src/data/)
+/data/
+/logs/
 
-# Logs
-*.log
-
-# IDE / OS
+# IDE
 .vscode/
 .idea/
+*.swp
 .DS_Store
 Thumbs.db
-
-# Node (ruflo tooling, not part of project)
-node_modules/
-package-lock.json
-package.json

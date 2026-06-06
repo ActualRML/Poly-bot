@@ -370,3 +370,38 @@ Saat fix "bot terlalu strict", jangan turunkan threshold ke bawah 1σ.
 **Fix**: Kode/config yang diubah untuk memperbaiki.
 
 **Pelajaran**: Prinsip umum yang harus diingat ke depan.
+
+---
+
+## [2026-05-19] Phase 5.5 counterfactual: consistency gate > threshold tuning
+
+**Temuan**: 24h log + Gamma resolution API. 5,067 floor-skip events, 2,644 matched ke 8 resolved hour-slots.
+
+| Metric | Value |
+|---|---|
+| Implied WR (cycle-level, all 0.10–0.20% mom) | 53.4% |
+| Implied WR (consistent signal ≥70% cycles agree) | 60.0% |
+| XRP | 59.0% |
+| ETH | 55.7% |
+| BTC | 54.8% |
+| DOGE | 52.8% |
+| BNB | 52.7% |
+| SOL | **42.9% (outlier)** |
+| Live Phase 5.5 actual WR | 22% (9 trades) |
+
+Gap implied vs actual ≈ 30pp → signal exists di data, tapi kualitas entry bot buruk.
+
+**Hipotesis**: Lowering threshold saja tidak cukup. Majority edge ada di slots dengan consistent signal — saat 15m momentum direction stabil sepanjang scan window, bukan oscillating. Filtering ke consistent-only (60%) vs all (53%) = +7pp pure dari stability gate.
+
+**Phase 5.6 plan**:
+1. Lower Filter #17: `UPDOWN_HOURLY_MOMENTUM_MIN` 0.0015→0.0010, `UPDOWN_HOURLY_MOMENTUM_VOL_FACTOR` 0.75→0.50
+2. Add consistency gate: entry hanya jika `sym_m15m` sign sama di ≥4/5 siklus terakhir untuk symbol itu
+3. Disable SOL sementara (outlier 42.9% — data menunjukkan momentum tidak predictive untuk SOL di regime ini)
+4. Stop rule: revert ke Phase 5.5 config jika WR < 45% setelah 30 trades post-5.6
+
+**Caveats**:
+- Sample hanya 1 hari (8 resolved hour-slots), regime-specific (BTC trending)
+- Implied WR ≠ actual: selection bias (floor-skips bukan random sample), tidak ada slippage/execution cost
+- Treat as directional hint, bukan proof — validate di live 30+ trades sebelum permanentkan
+
+**Pelajaran**: Saat analysis menunjukkan gap besar antara implied dan actual WR, root cause biasanya bukan threshold — tapi signal stability. Sebelum adjust numeric threshold, cek dulu apakah sinyal consistent sepanjang evaluation window. Oscillating signals yang lolos rata-rata momentum check != real edge.
