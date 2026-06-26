@@ -2,7 +2,7 @@
 
 Run in its own terminal:
 
-    uv run tele_server.py
+    uv run python -m src.notify.tele_server
 
 Long-polls the Telegram Bot API (getUpdates). When the *authorized* chat sends
 "/status", it runs the existing read-only state dump and replies with the
@@ -31,8 +31,9 @@ import urllib.request
 from pathlib import Path
 
 # Project root on sys.path so `scripts.*` (namespace pkg) and `src.*` import
-# regardless of cwd — mirrors the idiom in scripts/check_state.py.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# regardless of cwd — same idiom as scripts/check_state.py, two levels deeper
+# (this file now lives at src/notify/).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from scripts.check_state import _dump  # noqa: E402
 from src.config import Settings  # noqa: E402

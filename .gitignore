@@ -29,3 +29,6 @@ uv.lock
 *.swp
 .DS_Store
 Thumbs.db
+
+# Research probe outputs (regenerable; verdicts recorded in FINDINGS.md)
+research/diagnostics/

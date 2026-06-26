@@ -1,10 +1,6 @@
 # polymarket-bot
 
-Event-driven async Polymarket trading bot. WebSocket-first, plugin strategies, dry-run by default.
-
-## Status
-
-Foundation only — no real strategy logic yet. A `noop` placeholder proves the plugin pipeline end-to-end. Real strategies land in `src/strategy/` later.
+Event-driven async Polymarket trading bot. WebSocket-first, dry-run by default.
 
 ## Install
 
@@ -12,96 +8,76 @@ Foundation only — no real strategy logic yet. A `noop` placeholder proves the 
 uv sync
 ```
 
-`uv` creates `.venv/` and installs everything pinned in `pyproject.toml` (deps + dev group).
+`uv` membuat `.venv/` dan menginstal semua dependency dari `pyproject.toml`.
 
 ## Configure
 
 ```bash
-cp .env.example .env
+cp .env.example .env.local
 ```
 
-Fill in credentials, or keep them in `.env.secret` (already in `.gitignore`). Both files are loaded; `.env.secret` wins on conflict, real env vars win over both.
+Isi kredensial di `.env.local`, atau simpan yang rahasia di `.env.secret`
+(sudah masuk `.gitignore`). Keduanya dimuat; `.env.secret` menang saat bentrok,
+dan real environment variables menang atas keduanya.
 
-`DRY_RUN=true` is the default — the executor logs decisions but never places orders.
+`DRY_RUN=true` adalah default — bot mencatat keputusan tapi tidak pernah
+mengirim order.
 
-## Run
+## Run the bot
 
 ```bash
 uv run python -m src.main
 ```
 
-First-run behavior:
+- Logs:
+  - **stdout** — human-readable key/value
+  - **`logs/bot.log`** — JSON, rotating (5 MB × 3)
+  - **`logs/ws.log`** — JSON, rotating, frame WebSocket saja
+- Stop dengan `Ctrl+C` — graceful shutdown menutup WS, flush DB, exit 0.
 
-1. Validates credentials, fails fast with a clear message if any are missing.
-2. Initializes SQLite at `data/bot.db` (creates the file + tables on first run).
-3. Loads strategies listed in `ACTIVE_STRATEGIES` (`noop` by default).
-4. Opens the Polymarket WebSocket and starts a heartbeat task.
-5. Logs `strategy loaded strategy=noop` and `up ws_url=...`.
+## Check state
 
-No subscriptions are wired by default, so no market events flow — the bot idles on a live WS connection. Real strategies add their own subscriptions via `ws.subscribe(asset_ids=[...])`.
-
-Logs land in three places:
-
-- **stdout** — human-readable key/value
-- **`logs/bot.log`** — JSON, rotating (5 MB × 3)
-- **`logs/ws.log`** — JSON, rotating, WebSocket frames only (isolated so noisy connection storms don't drown the main log)
-
-Stop with `Ctrl+C` — graceful shutdown closes the WS, flushes the DB, exits 0.
-
-## Add a strategy
-
-Three steps. No core changes.
-
-1. Create `src/strategy/<name>.py`:
-
-   ```python
-   from src.strategy.base import Strategy
-   from src.execute.decision import Decision, MarketSnapshot, Action
-
-   class Plugin(Strategy):
-       name = "<name>"
-
-       async def evaluate(self, snapshot: MarketSnapshot) -> Decision:
-           # decide based on snapshot.event_type and snapshot.raw
-           if some_condition(snapshot):
-               return Decision(
-                   action=Action.BUY,
-                   strategy=self.name,
-                   side="YES",
-                   size_usdc=5.0,
-                   price=0.55,
-                   market_id=snapshot.market_id,
-                   reason="why",
-               )
-           return Decision.skip(strategy=self.name, reason="no signal")
-   ```
-
-2. Register it in `.env`:
-
-   ```
-   ACTIVE_STRATEGIES=noop,<name>
-   ```
-
-3. Re-run.
-
-**Hard rule**: strategies must NOT import from `src.api` or `src.data`. They receive a `MarketSnapshot`, they return a `Decision`. That isolation is what makes them unit-testable without mocks. If you need new data in a snapshot, add it to `MarketSnapshot` in `src/execute/decision.py` and populate it from the orchestrator — keep I/O out of the strategy layer.
-
-## Layout
-
+```bash
+uv run python scripts/check_state.py
 ```
-src/
-  api/          Polymarket REST + WS, Binance REST. All network I/O.
-  data/         SQLite connection + schema. All disk I/O.
-  strategy/     Plugin strategies. Pure logic, no I/O.
-  execute/      Decision dataclass + dry-run executor.
-  monitor/      Structured logging + heartbeat.
-  config.py     pydantic-settings loader.
-  main.py       asyncio orchestrator.
-tests/          Smoke + plugin contract tests.
+
+Dump read-only dari `data/bot.db`: balance, daftar posisi (open menampilkan
+unrealized P&L dari harga CLOB terkini), ringkasan per status & per strategi,
+serta realized P&L. Tidak pernah menulis ke DB.
+
+## Clear state
+
+```bash
+rm data/bot.db          # Windows: del data\bot.db
 ```
+
+Hapus database untuk mulai dari nol. Bot membuat ulang tabel dan me-reset
+balance ke 1000 USDC saat run berikutnya. Pastikan bot sedang berhenti dulu.
+
+## Telegram status server
+
+```bash
+uv run python -m src.notify.tele_server
+```
+
+Jalankan di terminal terpisah, berdampingan dengan bot. Kirim `/status` dari
+chat yang terotorisasi untuk menerima hasil state dump. Hanya merespons
+`telegram_chat_id` yang dikonfigurasi. Butuh `TELEGRAM_BOT_TOKEN` dan
+`TELEGRAM_CHAT_ID` di `.env.local` / `.env.secret`.
 
 ## Tests
 
 ```bash
 uv run pytest -q
 ```
+
+## Research (read-only)
+
+```bash
+python research/probe_orderbook_imbalance.py
+python research/probe_cross_coin.py
+python research/score_contrarian_test.py
+```
+
+Skrip analisis manual; semua read-only pada `data/bot.db`, output ke
+`research/diagnostics/`. Verdict lengkap di `FINDINGS.md`.

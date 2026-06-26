@@ -1,18 +1,14 @@
-from datetime import datetime, timezone
-
-
 def test_imports():
     import src.config  # noqa: F401
     import src.main  # noqa: F401
     import src.api.polymarket  # noqa: F401
     import src.api.polymarket_ws  # noqa: F401
-    import src.api.binance  # noqa: F401
     import src.api.binance_ws  # noqa: F401
     import src.api.ws_base  # noqa: F401
     import src.data.db  # noqa: F401
     import src.data.schema  # noqa: F401
     import src.strategy.base  # noqa: F401
-    import src.strategy.noop  # noqa: F401
+    import src.strategy.contrarian  # noqa: F401
     import src.execute.decision  # noqa: F401
     import src.execute.executor  # noqa: F401
     import src.monitor.logger  # noqa: F401
@@ -66,7 +62,7 @@ def test_config_loads_with_required_env(monkeypatch, tmp_path):
     from src.config import Settings
     s = Settings()
     assert s.dry_run is True
-    assert s.active_strategies == ["noop"]
+    assert s.active_strategies == ["contrarian"]
     s.require_credentials()
 
 
@@ -96,33 +92,3 @@ def test_active_strategies_parses_csv(monkeypatch, tmp_path):
     from src.config import Settings
     s = Settings()
     assert s.active_strategies == ["noop", "foo", "bar"]
-
-
-async def test_noop_plugin_contract():
-    from src.execute.decision import Action, MarketSnapshot
-    from src.strategy.base import Strategy
-    from src.strategy.noop import Plugin
-
-    plugin = Plugin()
-    assert isinstance(plugin, Strategy)
-    assert plugin.name == "noop"
-
-    snapshot = MarketSnapshot(
-        market_id="test-market",
-        event_type="book",
-        ts=datetime.now(timezone.utc),
-    )
-    decision = await plugin.evaluate(snapshot)
-    assert decision.action is Action.SKIP
-    assert decision.strategy == "noop"
-
-
-def test_market_snapshot_from_event():
-    from src.execute.decision import MarketSnapshot
-
-    snap = MarketSnapshot.from_event(
-        {"event_type": "book", "asset_id": "abc123", "bids": []}
-    )
-    assert snap.market_id == "abc123"
-    assert snap.event_type == "book"
-    assert snap.raw["bids"] == []

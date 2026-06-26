@@ -18,26 +18,37 @@ def _to_float(value) -> float | None:
         return None
 
 
-def _best_bid(bids) -> float | None:
-    # Polymarket sends bids unordered; the best bid is the HIGHEST price.
-    prices = [p for b in bids or [] if (p := _to_float(_get(b, "price"))) is not None]
-    return max(prices) if prices else None
-
-
-def _best_ask(asks) -> float | None:
-    # Best ask is the LOWEST asking price.
-    prices = [p for a in asks or [] if (p := _to_float(_get(a, "price"))) is not None]
-    return min(prices) if prices else None
-
-
 def _get(level, key):
     # Book levels are usually dicts ({"price":..,"size":..}); tolerate the
     # occasional [price, size] pair some feeds use.
     if isinstance(level, dict):
         return level.get(key)
-    if isinstance(level, (list, tuple)) and key == "price" and level:
-        return level[0]
+    if isinstance(level, (list, tuple)) and level:
+        if key == "price":
+            return level[0]
+        if key == "size" and len(level) > 1:
+            return level[1]
     return None
+
+
+def _book_side(levels, *, is_bid: bool) -> tuple[float | None, float | None, float | None]:
+    """(best_price, size_at_best, total_size) for one book side.
+
+    Best = HIGHEST bid / LOWEST ask (Polymarket sends levels unordered). Size at
+    best sums any levels sharing that price; total_size sums all levels. Size is
+    optional per level — missing sizes are skipped (None at touch / for totals if
+    none present), so a price-only book still yields best_price."""
+    parsed: list[tuple[float, float | None]] = []
+    for lvl in levels or []:
+        price = _to_float(_get(lvl, "price"))
+        if price is not None:
+            parsed.append((price, _to_float(_get(lvl, "size"))))
+    if not parsed:
+        return None, None, None
+    best_price = max(p for p, _ in parsed) if is_bid else min(p for p, _ in parsed)
+    size_at_best = sum(s for p, s in parsed if p == best_price and s is not None)
+    total = sum(s for _, s in parsed if s is not None)
+    return best_price, (size_at_best or None), (total or None)
 
 
 # price_change payloads vary by feed version: a nested array of update dicts
@@ -76,11 +87,12 @@ def parse_polymarket(raw: dict, symbol_lookup: dict[str, str]) -> MarketSnapshot
         asset_id = raw.get("asset_id") or None
 
         best_bid = best_ask = None
+        bid_size = ask_size = bid_depth = ask_depth = None
         price: float | None = None
 
         if event_type == "book":
-            best_bid = _best_bid(raw.get("bids"))
-            best_ask = _best_ask(raw.get("asks"))
+            best_bid, bid_size, bid_depth = _book_side(raw.get("bids"), is_bid=True)
+            best_ask, ask_size, ask_depth = _book_side(raw.get("asks"), is_bid=False)
             if best_bid is not None:
                 price = best_bid
             elif best_ask is not None:
@@ -118,6 +130,10 @@ def parse_polymarket(raw: dict, symbol_lookup: dict[str, str]) -> MarketSnapshot
             price=price,
             best_bid=best_bid,
             best_ask=best_ask,
+            bid_size=bid_size,
+            ask_size=ask_size,
+            bid_depth=bid_depth,
+            ask_depth=ask_depth,
             raw=raw,
         )
     except Exception as e:  # malformed message must not crash the bot

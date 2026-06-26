@@ -23,8 +23,20 @@ class VolatilityClassifier:
     fed by the binance feed in the orchestrator — strategies never see it.
     """
 
-    def __init__(self, window: int = VOL_WINDOW):
+    def __init__(
+        self,
+        window: int = VOL_WINDOW,
+        *,
+        min_samples: int = MIN_SAMPLES,
+        low_vol_max: float = LOW_VOL_MAX,
+        high_vol_min: float = HIGH_VOL_MIN,
+    ):
         self.window = window
+        # Thresholds default to the module constants; the orchestrator passes
+        # config.py values so they're tunable without editing this file.
+        self.min_samples = min_samples
+        self.low_vol_max = low_vol_max
+        self.high_vol_min = high_vol_min
         self._prices: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=window))
         self.log = get_logger("regime")
 
@@ -34,7 +46,7 @@ class VolatilityClassifier:
 
     def volatility(self, symbol: str | None) -> float | None:
         prices = self._prices.get(symbol) if symbol else None
-        if not prices or len(prices) < MIN_SAMPLES:
+        if not prices or len(prices) < self.min_samples:
             return None
         returns = [prices[i] / prices[i - 1] - 1.0 for i in range(1, len(prices)) if prices[i - 1]]
         if len(returns) < 2:
@@ -45,9 +57,9 @@ class VolatilityClassifier:
         vol = self.volatility(symbol)
         if vol is None:
             return "unknown"
-        if vol <= LOW_VOL_MAX:
+        if vol <= self.low_vol_max:
             return "low_vol"
-        if vol >= HIGH_VOL_MIN:
+        if vol >= self.high_vol_min:
             return "high_vol"
         return "mid_vol"
 

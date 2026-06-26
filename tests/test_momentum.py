@@ -1,15 +1,15 @@
-"""momentum: the moderate-favorite, trend-following strategy.
+"""momentum: the follow-the-EXTREME-favorite canary (mirror of contrarian).
 
-momentum triggers on the MODERATE zones (price_zone "high" -> buy YES, "low" ->
-buy NO), both requiring vol_regime "low_vol", and SKIPs the extreme zones. It is
-no longer a mirror of contrarian: the two now trade DISJOINT zones - momentum the
-moderate band, contrarian the extremes. These tests pin the high/low triggers and
-entry-cost math, that momentum no longer mirrors contrarian, that its params match
-the house knobs, and that it loads + registers through the existing machinery with
-zero plumbing. They touch ONLY momentum; contrarian's own tests in
-test_portfolio_void.py are left byte-for-byte unchanged.
+momentum triggers on the EXTREME zones in low_vol and buys the FAVORITE (the
+expensive side): extreme_high -> buy YES, extreme_low -> buy NO. It is the exact
+opposite bet of contrarian on the SAME trigger (contrarian buys the longshot).
+These tests pin the extreme-favorite triggers + entry-cost math, that non-extreme
+and non-low_vol zones SKIP, that it has NO contrarian-style runway gate (follow
+wins late), that its params raise entry_ceiling so a ~0.80 favorite can fill, and
+that it exports the Plugin the loader looks up. They touch ONLY momentum;
+contrarian's tests are left unchanged.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,13 +17,13 @@ from src.execute.decision import Action
 from src.strategy.params import StrategyParams
 
 
-def _snap(price_zone, vol_regime, *, price, market_id="0xMKT"):
+def _snap(price_zone, vol_regime, *, price, market_id="0xMKT", ts=None, resolve_time=None):
     """A polymarket snapshot pre-tagged with zone/vol (as the orchestrator would
     tag it before dispatch), with every field momentum.evaluate() guards on set."""
     from src.data.snapshot import MarketSnapshot
 
     return MarketSnapshot(
-        ts=datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc),
+        ts=ts or datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc),
         source="polymarket",
         event_type="book",
         symbol="BTC",
@@ -35,110 +35,94 @@ def _snap(price_zone, vol_regime, *, price, market_id="0xMKT"):
         outcome="YES",
         vol_regime=vol_regime,
         price_zone=price_zone,
+        resolve_time=resolve_time,
     )
 
 
-async def test_momentum_low_zone_buys_no():
-    """low zone + low_vol: NO is the favorite (YES 0.20-0.40), so momentum buys
-    NO. entry = 1 - yes_price (the true cost), landing in the moderate band."""
+async def test_extreme_high_low_vol_buys_yes_favorite():
     from src.strategy.momentum import Plugin
 
-    d = await Plugin().evaluate(_snap("low", "low_vol", price=0.30))
+    d = await Plugin().evaluate(_snap("extreme_high", "low_vol", price=0.82))
     assert d.action is Action.BUY
-    assert d.side == "NO"                       # NO is the favorite in the low zone
-    assert d.price == pytest.approx(0.70)       # NO costs 1 - 0.30
+    assert d.side == "YES"
+    assert d.price == pytest.approx(0.82)  # favorite cost = the YES price itself
 
 
-async def test_momentum_high_zone_buys_yes():
-    """high zone + low_vol: YES is the favorite (0.60-0.80), so momentum buys
-    YES at the yes-price."""
+async def test_extreme_low_low_vol_buys_no_favorite():
     from src.strategy.momentum import Plugin
 
-    d = await Plugin().evaluate(_snap("high", "low_vol", price=0.70))
+    d = await Plugin().evaluate(_snap("extreme_low", "low_vol", price=0.18))
     assert d.action is Action.BUY
-    assert d.side == "YES"                       # YES is the favorite in the high zone
-    assert d.price == pytest.approx(0.70)        # YES costs the yes-price
+    assert d.side == "NO"
+    assert d.price == pytest.approx(0.82)  # NO favorite cost = 1 - 0.18
 
 
-async def test_momentum_no_longer_mirrors_contrarian():
-    """The OLD mirror invariant is gone: momentum and contrarian no longer
-    trigger on the SAME zone. Momentum now trades the moderate (high/low) zones
-    and SKIPs the extremes; contrarian still trades the extremes and SKIPs the
-    moderate zones - disjoint triggers, not mirror images."""
-    from src.strategy.contrarian import Plugin as Contrarian
-    from src.strategy.momentum import Plugin as Momentum
+async def test_is_mirror_of_contrarian_side():
+    """Same trigger, OPPOSITE side: contrarian buys the longshot, momentum the
+    favorite. This is the whole point of the canary, so pin it explicitly."""
+    from src.strategy.contrarian import Plugin as Contra
+    from src.strategy.momentum import Plugin as Mom
 
-    # Extreme zones: momentum now SKIPs; contrarian still acts.
-    ex_high = _snap("extreme_high", "low_vol", price=0.95)
-    assert (await Momentum().evaluate(ex_high)).action is Action.SKIP
-    assert (await Contrarian().evaluate(ex_high)).action is Action.BUY
-
-    ex_low = _snap("extreme_low", "low_vol", price=0.05)
-    assert (await Momentum().evaluate(ex_low)).action is Action.SKIP
-    assert (await Contrarian().evaluate(ex_low)).action is Action.BUY
-
-    # Moderate zones: momentum acts; contrarian SKIPs.
-    high = _snap("high", "low_vol", price=0.70)
-    m_high = await Momentum().evaluate(high)
-    assert m_high.action is Action.BUY and m_high.side == "YES"
-    assert (await Contrarian().evaluate(high)).action is Action.SKIP
-
-    low = _snap("low", "low_vol", price=0.30)
-    m_low = await Momentum().evaluate(low)
-    assert m_low.action is Action.BUY and m_low.side == "NO"
-    assert (await Contrarian().evaluate(low)).action is Action.SKIP
+    snap = _snap("extreme_low", "low_vol", price=0.18,
+                 resolve_time=datetime(2026, 6, 18, 13, 0, 0, tzinfo=timezone.utc))
+    cd = await Contra().evaluate(snap)
+    md = await Mom().evaluate(snap)
+    assert cd.side == "YES" and md.side == "NO"  # opposite sides, same market
 
 
-async def test_momentum_skips_non_polymarket():
-    """Guard parity with contrarian: a non-polymarket snapshot is skipped."""
+async def test_moderate_and_uncertain_zones_skip():
+    # momentum trades EXTREMES only; the moderate band is the dead -$187 design.
     from src.strategy.momentum import Plugin
 
-    snap = _snap("extreme_low", "low_vol", price=0.05)
-    snap.source = "binance"
-    assert (await Plugin().evaluate(snap)).action is Action.SKIP
+    for z in ("high", "low", "uncertain"):
+        d = await Plugin().evaluate(_snap(z, "low_vol", price=0.70))
+        assert d.action is Action.SKIP, z
 
 
-async def test_momentum_skips_outside_signal_zone():
-    """Guard parity: an extreme zone under high_vol is NOT a signal -> skip."""
+async def test_non_low_vol_skips():
     from src.strategy.momentum import Plugin
 
-    assert (await Plugin().evaluate(_snap("extreme_low", "high_vol", price=0.05))).action is Action.SKIP
+    for v in ("mid_vol", "high_vol", "unknown"):
+        d = await Plugin().evaluate(_snap("extreme_high", v, price=0.85))
+        assert d.action is Action.SKIP, v
 
 
-def test_momentum_params_pinned():
-    """momentum declares the SAME knobs as contrarian (0.15 / 0.02) for parity.
-    It buys the expensive side, so the floor never binds in practice; it's pinned
-    here to match contrarian and to trip if the Plugin's params line drifts."""
+async def test_no_runway_gate_follow_wins_late():
+    """Unlike contrarian, momentum must STILL fire with little time left (a
+    follow-the-favorite bet wins late). Same near-lock snapshot: contrarian SKIPs
+    on its runway gate, momentum BUYs."""
+    from src.strategy.contrarian import Plugin as Contra
+    from src.strategy.momentum import Plugin as Mom
+
+    ts = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+    near_lock = _snap("extreme_high", "low_vol", price=0.85, ts=ts,
+                      resolve_time=ts + timedelta(seconds=120))  # 2 min left
+    assert (await Contra().evaluate(near_lock)).action is Action.SKIP   # runway gate
+    assert (await Mom().evaluate(near_lock)).action is Action.BUY       # no gate
+
+
+async def test_debounce_same_market_same_ts():
     from src.strategy.momentum import Plugin
 
-    p = Plugin().params
-    assert isinstance(p, StrategyParams)
-    assert p.entry_floor == 0.15
-    assert p.bet_fraction == 0.02
+    p = Plugin()
+    s = _snap("extreme_high", "low_vol", price=0.85)
+    assert (await p.evaluate(s)).action is Action.BUY
+    assert (await p.evaluate(s)).action is Action.SKIP  # within debounce window
 
 
-def test_active_strategies_order_contrarian_first(monkeypatch, tmp_path):
-    """Activation order parses with contrarian FIRST - load-bearing, since the
-    first-dispatched strategy wins is_held collisions on shared markets."""
-    monkeypatch.chdir(tmp_path)  # clean cwd so the real .env.local can't leak in
-    for k in ("PK_PRIVATE_KEY", "CLOB_API_KEY", "CLOB_SECRET", "CLOB_PASS"):
-        monkeypatch.setenv(k, "t")
-    monkeypatch.setenv("ACTIVE_STRATEGIES", "contrarian,momentum")
+def test_params_raise_ceiling_for_favorites():
+    from src.strategy.momentum import Plugin
 
-    from src.config import Settings
-
-    assert Settings().active_strategies == ["contrarian", "momentum"]
+    assert Plugin.params == StrategyParams(
+        entry_floor=0.50, bet_fraction=0.02, entry_ceiling=0.85
+    )
+    # ceiling MUST clear a ~0.80 favorite or every favorite fill is rejected.
+    assert Plugin.params.entry_ceiling >= 0.80
 
 
-def test_registry_resolves_momentum_params_via_existing_loader():
-    """The plug-and-play claim, exercised end-to-end: _load_strategies imports +
-    instantiates momentum, and the registry main.py builds ({s.name: s.params})
-    resolves momentum's params with zero extra plumbing."""
-    from src.main import _load_strategies
+def test_exports_plugin_for_loader():
+    """_load_strategies(['momentum']) does importlib + getattr(module,'Plugin')."""
+    import importlib
 
-    strategies = _load_strategies(["contrarian", "momentum"])
-    assert [s.name for s in strategies] == ["contrarian", "momentum"]  # order preserved
-
-    registry = {s.name: s.params for s in strategies}  # mirrors src/main.py:325
-    assert registry["momentum"].entry_floor == 0.15
-    assert registry["momentum"].bet_fraction == 0.02
+    mod = importlib.import_module("src.strategy.momentum")
+    assert mod.Plugin().name == "momentum"

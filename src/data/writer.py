@@ -8,14 +8,17 @@ from src.monitor.logger import get_logger
 _INSERT_SQL = """
     INSERT INTO snapshots
         (ts, source, event_type, symbol, market_id, asset_id, price, best_bid, best_ask,
-         vol_regime, price_zone)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         bid_size, ask_size, bid_depth, ask_depth, vol_regime, price_zone)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # Sample the high-frequency floods to ~1 row per key per interval; book and
 # last_trade_price bypass (sparse, kept whole for backtest fidelity).
 _THROTTLED_EVENTS = {"price_change", "ticker"}
 _SAMPLE_INTERVAL_S = 10.0
+# Markets we currently hold a position in get a finer sample interval so the
+# intra-trade price path is dense enough for MFE/MAE analysis afterwards.
+_PRIORITY_SAMPLE_INTERVAL_S = 1.0
 
 
 class SnapshotWriter:
@@ -41,6 +44,10 @@ class SnapshotWriter:
         self.flush_interval_s = flush_interval_s
         self._buf: list[tuple] = []
         self._last_ts: dict[str, float] = {}
+        # market_ids of currently-open positions; refreshed by the orchestrator.
+        # Snapshots for these are sampled finer (see add()). Empty => no change
+        # from the plain throttle, so default behaviour is untouched.
+        self.priority_markets: set[str] = set()
         self._stop = asyncio.Event()
         self._flush_now = asyncio.Event()
         self.log = get_logger("storage")
@@ -55,9 +62,15 @@ class SnapshotWriter:
         if snapshot.event_type in _THROTTLED_EVENTS:
             key = snapshot.asset_id or snapshot.symbol
             if key is not None:
+                # Markets we hold are sampled finer for intra-trade analysis.
+                interval = (
+                    _PRIORITY_SAMPLE_INTERVAL_S
+                    if snapshot.market_id and snapshot.market_id in self.priority_markets
+                    else _SAMPLE_INTERVAL_S
+                )
                 now = snapshot.ts.timestamp()
                 last = self._last_ts.get(key)
-                if last is not None and now - last < _SAMPLE_INTERVAL_S:
+                if last is not None and now - last < interval:
                     return
                 self._last_ts[key] = now
         self._buf.append(self._to_row(snapshot))
@@ -76,6 +89,10 @@ class SnapshotWriter:
             s.price,
             s.best_bid,
             s.best_ask,
+            s.bid_size,
+            s.ask_size,
+            s.bid_depth,
+            s.ask_depth,
             s.vol_regime,
             s.price_zone,
         )

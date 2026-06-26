@@ -5,7 +5,7 @@ so these lock down (a) the balance refund is exactly the stake, (b) the status
 flips to 'void' with pnl=0 / exit_price NULL, (c) a second call is a no-op (the
 double-refund guard), and (d) a voided row drops out of list_open().
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -13,10 +13,18 @@ from src.data.db import Database
 from src.data.schema import create_tables
 from src.data.snapshot import MarketSnapshot
 from src.execute.decision import Action, Decision
+from src.execute.fill import YesBook
 from src.execute.portfolio import Portfolio
 from src.strategy.params import StrategyParams
 
 TS = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+
+
+def _book(ask: float, bid: float | None = None) -> YesBook:
+    """A simple two-sided YES book with no depth data → single-price (model 2)
+    fill at the ask, so a YES open fills its full stake at `ask`. Enough to
+    exercise open_position's bookkeeping without depth-walk noise."""
+    return YesBook(yes_bid=bid if bid is not None else ask - 0.01, yes_ask=ask)
 
 
 async def _portfolio(tmp_path, strategy_params=None) -> Portfolio:
@@ -112,7 +120,7 @@ async def test_open_position_records_strategy(tmp_path):
         best_bid=None,
         best_ask=None,
     )
-    opened = await pf.open_position(decision, snapshot)
+    opened = await pf.open_position(decision, snapshot, _book(ask=0.5))
     assert opened is True
     row = await pf.db.fetchone(
         "SELECT strategy, side FROM positions WHERE market_id = ?", ("0xMKT",)
@@ -123,14 +131,38 @@ async def test_open_position_records_strategy(tmp_path):
 
 
 def test_contrarian_params_pinned():
-    """Contrarian declares its own entry floor + sizing (0.15 / 0.02). Pinning
-    them here guards against a silent revert if the StrategyParams defaults or
-    the Plugin's params line ever drift."""
+    """Contrarian declares its own entry floor + sizing + ceiling (0.15 / 0.02 /
+    0.30). Pinning them here guards against a silent revert if the StrategyParams
+    defaults or the Plugin's params line ever drift."""
     from src.strategy.contrarian import Plugin
 
     p = Plugin().params
     assert p.entry_floor == 0.15
     assert p.bet_fraction == 0.02
+    assert p.entry_ceiling == 0.30
+
+
+async def test_open_position_caps_entry_at_strategy_ceiling(tmp_path):
+    """The taker walk is limit-priced at the strategy's entry_ceiling: a thin book
+    that would otherwise walk an entry well past 0.30 opens instead at avg <= 0.30
+    (a partial — only the liquidity under the cap is taken). Guards the wiring of
+    entry_ceiling -> simulate_taker_fill(max_price=...)."""
+    pf = await _portfolio(
+        tmp_path,
+        strategy_params={
+            "contrarian": StrategyParams(entry_floor=0.15, bet_fraction=0.02, entry_ceiling=0.30)
+        },
+    )
+    # p0=0.16, spread=0.03, tiny size/level but ample depth -> uncapped this walks
+    # far past 0.30; the cap must stop it.
+    book = YesBook(yes_bid=0.13, yes_ask=0.16,
+                   yes_ask_size=5, yes_ask_depth=10000,
+                   yes_bid_size=5, yes_bid_depth=10000)
+    assert await pf.open_position(_buy(0.16, market_id="0xCAP"), _snap("0xCAP"), book) is True
+    row = await pf.db.fetchone("SELECT entry_price, fill_flag FROM positions WHERE market_id = ?", ("0xCAP",))
+    assert row["entry_price"] <= 0.30 + 1e-9   # never filled into expensive shares
+    assert row["fill_flag"] == "partial"       # cap left the rest of the stake unfilled
+    await pf.db.close()
 
 
 def _buy(price, *, market_id, strategy="contrarian"):
@@ -162,11 +194,40 @@ async def test_open_position_applies_strategy_floor(tmp_path):
     assert await pf.open_position(_buy(0.12, market_id="0xLOW"), _snap("0xLOW")) is False
     assert await pf.get_balance() == pytest.approx(1000.0)
 
-    # At/above the floor -> opens; stake = 1000 * 0.02 = 20 (pins `frac`).
-    assert await pf.open_position(_buy(0.16, market_id="0xOK"), _snap("0xOK")) is True
+    # At/above the floor -> opens; stake = 1000 * 0.02 = 20 (pins `frac`). With a
+    # full-fill book (no depth cap) the whole 20 is deployed.
+    assert await pf.open_position(_buy(0.16, market_id="0xOK"), _snap("0xOK"), _book(ask=0.16)) is True
     row = await pf.db.fetchone("SELECT size_usdc FROM positions WHERE market_id = ?", ("0xOK",))
     assert row["size_usdc"] == pytest.approx(20.0)
     assert await pf.get_balance() == pytest.approx(980.0)
+    await pf.db.close()
+
+
+async def test_open_position_rejects_stale_book(tmp_path):
+    """A book older than MAX_BOOK_AGE_SEC vs the decision is fiction (a
+    price_change fired long after the last real book) — skip, don't fill. Mirrors
+    the BNB flicker bug: the signal sees an extreme while the only book is minutes
+    stale at ~mid, walking to a fake ~0.7 entry."""
+    from src.execute.portfolio import MAX_BOOK_AGE_SEC
+
+    pf = await _portfolio(
+        tmp_path,
+        strategy_params={"contrarian": StrategyParams(entry_floor=0.15, bet_fraction=0.02)},
+    )
+    snap = _snap("0xSTALE")  # decision snapshot at TS (12:00:00)
+
+    # Book captured 1s past the max age -> stale -> skip, bankroll untouched.
+    stale_ts = snap.ts - timedelta(seconds=MAX_BOOK_AGE_SEC + 1)
+    assert await pf.open_position(
+        _buy(0.16, market_id="0xSTALE"), snap, _book(ask=0.16), stale_ts
+    ) is False
+    assert await pf.get_balance() == pytest.approx(1000.0)
+
+    # Same book captured within the window -> fresh -> opens.
+    fresh_ts = snap.ts - timedelta(seconds=MAX_BOOK_AGE_SEC - 1)
+    assert await pf.open_position(
+        _buy(0.16, market_id="0xFRESH"), _snap("0xFRESH"), _book(ask=0.16), fresh_ts
+    ) is True
     await pf.db.close()
 
 
@@ -181,9 +242,9 @@ async def test_open_position_floor_is_per_strategy_not_the_default(tmp_path):
     )
 
     # 0.20 clears the 0.15 default but not contrarian's registered 0.30 -> skip.
-    assert await pf.open_position(_buy(0.20, market_id="0xC"), _snap("0xC")) is False
+    assert await pf.open_position(_buy(0.20, market_id="0xC"), _snap("0xC"), _book(ask=0.20)) is False
     # Unregistered "ghost" -> DEFAULT_PARAMS (0.15) -> 0.20 clears it -> opens.
     assert await pf.open_position(
-        _buy(0.20, market_id="0xG", strategy="ghost"), _snap("0xG")
+        _buy(0.20, market_id="0xG", strategy="ghost"), _snap("0xG"), _book(ask=0.20)
     ) is True
     await pf.db.close()

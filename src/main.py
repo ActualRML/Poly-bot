@@ -9,7 +9,7 @@ from pathlib import Path
 from src.api.binance_ws import BinanceWSClient
 from src.api.polymarket import PolymarketREST, SYMBOL_HINTS
 from src.api.polymarket_ws import PolymarketWSClient
-from src.classify.price_zone import ZONE_ORDER, classify_price_zone
+from src.classify.price_zone import ZONE_ORDER, ZoneThresholds, classify_price_zone
 from src.classify.volatility import VolatilityClassifier
 from src.config import Settings
 from src.data.db import Database
@@ -18,6 +18,8 @@ from src.data.schema import create_tables
 from src.data.writer import SnapshotWriter
 from src.execute.decision import Action
 from src.execute.executor import DryRunExecutor
+from src.execute.exits import maybe_slow_rise_exit, maybe_stop_loss
+from src.execute.fill import YesBook, yes_book_from_token
 from src.execute.portfolio import Portfolio
 from src.execute.resolver import resolve_loop
 from src.monitor.health import Health, heartbeat
@@ -163,6 +165,24 @@ async def _storage_summary(writer: SnapshotWriter, db_path: Path) -> None:
         log.info(f"wrote {rows} snapshots (batches: {batches})  db={size_mb:.1f}MB")
 
 
+async def _refresh_priority_markets(
+    writer: SnapshotWriter, db: Database, interval: int = 15
+) -> None:
+    """Keep the writer's fine-sampling set in sync with currently-open positions
+    so the price path of markets we hold is captured at higher resolution for
+    later MFE/MAE trade analysis. Read-only on the DB; no effect on decisions."""
+    log = get_logger("storage")
+    while True:
+        try:
+            rows = await db.fetchall(
+                "SELECT DISTINCT market_id FROM positions WHERE status = 'open'"
+            )
+            writer.priority_markets = {r["market_id"] for r in rows if r["market_id"]}
+        except Exception as e:
+            log.debug("priority-market refresh failed", extra={"error": str(e)})
+        await asyncio.sleep(interval)
+
+
 # Maps the classifier's regime label to the human-readable vol word shown in the
 # status line (the raw float already appears in the regime line above).
 _VOL_DISPLAY = {"low_vol": "low", "mid_vol": "mid", "high_vol": "high", "unknown": "unknown"}
@@ -196,6 +216,7 @@ async def _regime_summary(
     zone_counts: dict[str, int],
     portfolio: Portfolio,
     latest_yes: dict[str, float],
+    zones: ZoneThresholds,
 ) -> None:
     """60s proof both classifier dimensions work — with raw vol for tuning.
     Also emits a per-coin status block (pos + zone + vol)."""
@@ -224,7 +245,7 @@ async def _regime_summary(
             for sym in STATUS_COINS:
                 rows = open_by_sym.get(sym, [])
                 pos = _active_side(rows, now) if rows else "skip"
-                zone = classify_price_zone(latest_yes.get(sym))
+                zone = classify_price_zone(latest_yes.get(sym), zones)
                 vol = _VOL_DISPLAY.get(classifier.get_regime(sym), "unknown")
                 log_s.info(f"{sym:<4} pos={pos:<4}  zone={zone:<12}  vol={vol}")
         except Exception:
@@ -305,7 +326,19 @@ async def run() -> int:
     strategies = _load_strategies(settings.active_strategies)
     log.info(f"strategies active: {[s.name for s in strategies]}")
     writer = SnapshotWriter(db)
-    vol_classifier = VolatilityClassifier()
+    # Classifier knobs come from config (defaults = calibrated values).
+    zones = ZoneThresholds(
+        settings.zone_extreme_low,
+        settings.zone_low,
+        settings.zone_uncertain,
+        settings.zone_high,
+    )
+    vol_classifier = VolatilityClassifier(
+        settings.vol_window,
+        min_samples=settings.vol_min_samples,
+        low_vol_max=settings.vol_low_max,
+        high_vol_min=settings.vol_high_min,
+    )
     zone_counts: dict[str, int] = {z: 0 for z in ZONE_ORDER}
     health = Health()
 
@@ -329,6 +362,17 @@ async def run() -> int:
     parse_stats = {"poly_book": 0, "poly_price_change": 0, "poly_last_trade_price": 0, "poly_other": 0, "binance": 0}
     latest_yes: dict[str, float] = {}   # symbol -> latest polymarket yes-price
     latest_spot: dict[str, float] = {}  # symbol -> latest binance spot
+    # market_id -> latest YES-perspective top-of-book, for realistic taker-fill
+    # costing at open. A decision can fire on a price_change event (no book), and
+    # either token can tick, so we keep the freshest book per market here rather
+    # than relying on the triggering snapshot. See src/execute/fill.py.
+    latest_book: dict[str, YesBook] = {}
+    # market_id -> ts of the cached book above, so open_position can reject a
+    # stale book (a price_change can fire long after the last real book event).
+    latest_book_ts: dict[str, datetime] = {}
+    # market_ids whose slow-rise first-reach-of-V has been handled (decide once per
+    # position; see exits.maybe_slow_rise_exit). Reset on restart; bounded by run length.
+    slowrise_seen: set[str] = set()
 
     _POLY_STAT = {
         "book": "poly_book",
@@ -351,11 +395,40 @@ async def run() -> int:
             snapshot.price = 1.0 - snapshot.price
         if snapshot.symbol and snapshot.price is not None:
             latest_yes[snapshot.symbol] = snapshot.price
+        # Cache the freshest YES-perspective book per market for realistic fill
+        # costing at open. Only book events carry quotes, and only a known
+        # outcome lets us reflect the raw (per-token) book into YES terms.
+        if (
+            snapshot.event_type == "book"
+            and snapshot.market_id is not None
+            and snapshot.outcome in ("YES", "NO")
+            and (snapshot.best_bid is not None or snapshot.best_ask is not None)
+        ):
+            latest_book[snapshot.market_id] = yes_book_from_token(
+                snapshot.outcome,
+                snapshot.best_bid,
+                snapshot.best_ask,
+                snapshot.bid_size,
+                snapshot.ask_size,
+                snapshot.bid_depth,
+                snapshot.ask_depth,
+            )
+            latest_book_ts[snapshot.market_id] = snapshot.ts
+        # Copy the market's resolution time onto the snapshot so time-aware
+        # strategies (contrarian's reversion-runway gate) can measure time-to-resolve
+        # against snapshot.ts. market_meta is keyed by condition_id == market_id.
+        snapshot.resolve_time = (market_meta.get(snapshot.market_id) or {}).get("resolve_time")
         # Tag both dimensions before dispatch/store (observation only).
         snapshot.vol_regime = vol_classifier.get_regime(snapshot.symbol)
-        snapshot.price_zone = classify_price_zone(snapshot.price)
+        snapshot.price_zone = classify_price_zone(snapshot.price, zones)
         zone_counts[snapshot.price_zone] = zone_counts.get(snapshot.price_zone, 0) + 1
         writer.add(snapshot)  # persist every snapshot, regardless of decision
+        # Exit overlays on held positions (book just cached → sell sees a fresh book):
+        # time-gated SL (near-dead side in the final minutes) + slow-rise (weak riser
+        # at 0.40). See src/execute/exits.py.
+        await maybe_stop_loss(settings, snapshot, market_meta, portfolio, executor, latest_book)
+        await maybe_slow_rise_exit(settings, snapshot, market_meta, portfolio, executor,
+                                   latest_book, slowrise_seen)
         poly_ws.log.debug(
             "snapshot",
             extra={
@@ -375,10 +448,14 @@ async def run() -> int:
                 )
                 continue
             if decision.action is not Action.SKIP:
-                held = await portfolio.is_held(decision.market_id)
+                held = await portfolio.is_held(decision.market_id, decision.strategy)
                 await executor.execute(decision, snapshot, held=held)
                 if not held:
-                    await portfolio.open_position(decision, snapshot)
+                    await portfolio.open_position(
+                        decision, snapshot,
+                        latest_book.get(decision.market_id),
+                        latest_book_ts.get(decision.market_id),
+                    )
             else:
                 await executor.execute(decision, snapshot)
 
@@ -414,10 +491,14 @@ async def run() -> int:
                 )
                 continue
             if decision.action is not Action.SKIP:
-                held = await portfolio.is_held(decision.market_id)
+                held = await portfolio.is_held(decision.market_id, decision.strategy)
                 await executor.execute(decision, snapshot, held=held)
                 if not held:
-                    await portfolio.open_position(decision, snapshot)
+                    await portfolio.open_position(
+                        decision, snapshot,
+                        latest_book.get(decision.market_id),
+                        latest_book_ts.get(decision.market_id),
+                    )
             else:
                 await executor.execute(decision, snapshot)
 
@@ -443,9 +524,10 @@ async def run() -> int:
     tasks.append(asyncio.create_task(poly_ws.run(), name="poly_ws"))
     tasks.append(asyncio.create_task(binance_ws.run(), name="binance_ws"))
     tasks.append(asyncio.create_task(writer.run(), name="snapshot_writer"))
+    tasks.append(asyncio.create_task(_refresh_priority_markets(writer, db), name="priority_refresh"))
     tasks.append(asyncio.create_task(_parse_summary(parse_stats, latest_yes, latest_spot), name="parse_summary"))
     tasks.append(asyncio.create_task(_storage_summary(writer, settings.db_path), name="storage_summary"))
-    tasks.append(asyncio.create_task(_regime_summary(vol_classifier, zone_counts, portfolio, latest_yes), name="regime_summary"))
+    tasks.append(asyncio.create_task(_regime_summary(vol_classifier, zone_counts, portfolio, latest_yes, zones), name="regime_summary"))
     tasks.append(asyncio.create_task(heartbeat(health), name="heartbeat"))
     tasks.append(asyncio.create_task(
         resolve_loop(portfolio, rest, market_meta=market_meta, dry_run=settings.dry_run),
