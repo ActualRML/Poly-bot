@@ -1,5 +1,7 @@
 # polymarket-bot
 
+Polymarket Bot is an event-driven async trading bot for Polymarket prediction markets, built in Python with a WebSocket-first architecture. It streams live order-book data from Polymarket CLOB and Binance concurrently, evaluates multi-strategy signals, and persists positions to SQLite. Built as a research and engineering project — all trading is simulated via dry-run mode. See FINDINGS.md for the full research verdict.
+
 Event-driven async Polymarket trading bot. WebSocket-first, dry-run by default.
 
 ## Install
